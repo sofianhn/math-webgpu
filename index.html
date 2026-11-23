@@ -11,10 +11,9 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Train a tiny MLP on <strong>two-digit</strong> arithmetic (operands
-        <strong>0–99</strong>) in your browser. Charts show learning; the data
-        feed shows exactly what it saw; parameter tables show how many numbers
-        the model stores.
+        Make the demo smarter with <strong>size presets</strong>, a tunable
+        <strong>dataset (examples → tokens)</strong>, and
+        <strong>held-out + perplexity evals</strong> the optimizer never trains on.
         <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
@@ -24,11 +23,48 @@
 
       <section id="controls" hidden>
         <p class="hint">
-          Knobs below change <em>how fast / how stably</em> it fits the training
-          distribution — not the domain itself. Domain = integers
-          <strong>0–99</strong>. Values <strong>≥&nbsp;100</strong> (three digits)
-          are out of distribution.
+          Domain = operands <strong>0–99</strong>. Held-out evals exclude ones-digit
+          <strong>7</strong> from training so you can see memorization vs generalization.
+          Perplexity = <code>exp(cross-entropy)</code> on answer classes.
         </p>
+
+        <h3 class="subhead">Model size (parameter count)</h3>
+        <div class="presets" role="group" aria-label="Model size presets">
+          <button type="button" data-size="tiny" class="preset">Tiny · H32</button>
+          <button type="button" data-size="small" class="preset">Small · H64</button>
+          <button type="button" data-size="medium" class="preset is-active">Medium · H96</button>
+          <button type="button" data-size="large" class="preset">Large · H192</button>
+          <button type="button" data-size="xlarge" class="preset">XL · H256</button>
+          <button type="button" data-size="custom" class="preset">Custom</button>
+        </div>
+        <label>
+          Hidden units (custom)
+          <input id="hidden" type="number" min="16" max="512" step="8" value="96" />
+        </label>
+        <p id="param-count" class="hint param-count">Parameters: —</p>
+
+        <h3 class="subhead">Dataset scale (per token)</h3>
+        <p class="hint">
+          Each expression = <strong>5 tokens</strong> (a_tens, a_ones, op, b_tens, b_ones).
+          Tokens/epoch ≈ examples/epoch × 5.
+        </p>
+        <div class="presets" role="group" aria-label="Dataset scale presets">
+          <button type="button" data-data="thin" class="preset">Thin · 1k ex/ep</button>
+          <button type="button" data-data="default" class="preset is-active">Default · 2.5k</button>
+          <button type="button" data-data="rich" class="preset">Rich · 5k</button>
+          <button type="button" data-data="custom" class="preset">Custom</button>
+        </div>
+        <label>
+          Examples / epoch
+          <input id="examples" type="number" min="128" max="20000" step="64" value="2560" />
+        </label>
+        <label>
+          Batch size
+          <input id="batch" type="number" min="4" max="256" value="64" />
+        </label>
+        <p id="token-count" class="hint param-count">Tokens / epoch: —</p>
+
+        <h3 class="subhead">Optimization</h3>
         <div class="presets" role="group" aria-label="Learning presets">
           <button type="button" data-preset="careful" class="preset">Careful · lr 0.001</button>
           <button type="button" data-preset="default" class="preset is-active">Default · lr 0.01</button>
@@ -36,49 +72,46 @@
         </div>
         <label>
           Epochs
-          <input id="epochs" type="number" min="1" max="300" value="60" />
-        </label>
-        <label>
-          Batch size
-          <input id="batch" type="number" min="4" max="128" value="64" />
+          <input id="epochs" type="number" min="1" max="300" value="40" />
         </label>
         <label>
           Learning rate
           <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.01" />
         </label>
-        <label>
-          Hidden units
-          <input id="hidden" type="number" min="16" max="256" step="16" value="96" />
+        <label class="check">
+          <input id="heldout" type="checkbox" checked />
+          Held-out eval each epoch (ones-digit 7 never in train)
         </label>
         <button id="train" type="button">Train (pretrain)</button>
-        <button id="eval" type="button" disabled>Evaluate</button>
+        <button id="eval" type="button" disabled>Evaluate train-dist</button>
       </section>
 
       <section id="data" hidden>
         <h2>What data is it training on?</h2>
         <p class="hint">
-          Each example is a random expression with operands in <strong>0–99</strong>
-          and op in {+, −, ×, ÷}. Features are <em>place-value</em> one-hots
-          (tens digit + ones digit for each operand), not a single flat ID per number.
-          Answers are classification classes <strong>0–999</strong> (huge products are
-          resampled so they fit).
+          Train rows avoid held-out digit patterns when the checkbox is on. The held-out
+          panel shows expressions the optimizer <em>never</em> saw.
         </p>
         <div id="data-feed" class="data-feed" aria-live="polite">
           <p class="data-headline">Hit Train to stream live batch examples here.</p>
+        </div>
+        <h3 class="subhead">Held-out bank (eval only)</h3>
+        <div id="hold-feed" class="data-feed" aria-live="polite">
+          <p class="data-headline">Enable held-out eval to list frozen probe expressions.</p>
         </div>
       </section>
 
       <section id="internals" hidden>
         <h2>Training internals</h2>
-        <p id="progress" class="progress" aria-live="polite">Idle — hit Train to follow loss &amp; accuracy live.</p>
+        <p id="progress" class="progress" aria-live="polite">Idle — hit Train to follow loss, perplexity &amp; held-out live.</p>
         <div class="progress-track" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
         <p id="smartness" class="smartness" aria-live="polite">Smartness: not trained yet</p>
+        <p id="eval-line" class="eval-line" aria-live="polite"></p>
         <svg id="curves" class="curves" xmlns="http://www.w3.org/2000/svg"></svg>
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
         <p class="hint">
-          These are not the knobs above. They are the actual arrays of numbers the
-          network adjusts. Count = how many numbers in that table. Bars = overall
-          magnitude before → after one train run.
+          Count = how many numbers in that table. Bars = magnitude before → after.
+          Bigger size presets → more parameters → more capacity to fit (and overfit).
         </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>
@@ -87,10 +120,9 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          In-domain: <strong>0–99</strong> (up to two digits). Try
-          <code>12 + 34</code>. For <strong>100+</strong> (three digits), you’ll get
-          an OOD message — more epochs will not invent a hundreds place the encoder
-          never had.
+          In-domain: <strong>0–99</strong>. Try a held-out pattern like
+          <code>17 + 2</code> (ones-digit 7) after training — if train acc is high but
+          this fails, you mostly memorized.
         </p>
         <div class="row">
           <input id="a" type="number" min="0" max="999" value="12" />

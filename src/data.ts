@@ -35,6 +35,9 @@ export function computeAnswer(a: number, op: Op, b: number): number {
  */
 export const INPUT_DIM = DIGIT_SLOTS + DIGIT_SLOTS + OPS.length + DIGIT_SLOTS + DIGIT_SLOTS;
 
+/** Each expression is 5 place-value “tokens”: a_tens, a_ones, op, b_tens, b_ones. */
+export const TOKENS_PER_EXAMPLE = 5;
+
 export function inDomain(a: number, b: number): boolean {
   return (
     Number.isInteger(a) &&
@@ -98,23 +101,33 @@ export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
   [40, "/", 8],
 ];
 
-function sampleInRange(): { a: number; op: Op; b: number; answer: number } {
-  for (let attempt = 0; attempt < 40; attempt++) {
+export type SampleFilter = (a: number, b: number, op: Op) => boolean;
+
+function sampleInRange(filter?: SampleFilter): { a: number; op: Op; b: number; answer: number } {
+  for (let attempt = 0; attempt < 80; attempt++) {
     const a = Math.floor(Math.random() * (MAX_OPERAND + 1));
     const b = Math.floor(Math.random() * (MAX_OPERAND + 1));
     const op = OPS[Math.floor(Math.random() * OPS.length)]!;
+    if (filter && !filter(a, b, op)) continue;
     const answer = computeAnswer(a, op, b);
     if (answer < NUM_CLASSES) return { a, op, b, answer };
   }
-  // Fallback that always fits: addition of small values.
+  // Fallback that always fits and usually passes ones-digit holdouts that exclude 7.
   const a = Math.floor(Math.random() * 50);
   const b = Math.floor(Math.random() * 50);
-  return { a, op: "+", b, answer: a + b };
+  const op: Op = "+";
+  if (!filter || filter(a, b, op)) return { a, op, b, answer: a + b };
+  return { a: 0, op: "+", b: 0, answer: 0 };
 }
 
 /** Synthetic arithmetic dataset for pre-training (answer classification). */
 export class ArithmeticDataset implements Dataset {
   readonly name = "synthetic-arithmetic-2digit";
+  private readonly filter?: SampleFilter;
+
+  constructor(filter?: SampleFilter) {
+    this.filter = filter;
+  }
 
   size(): number {
     // Approximate: most (a,op,b) fit; mul with huge products is resampled away.
@@ -127,7 +140,7 @@ export class ArithmeticDataset implements Dataset {
     const texts: string[] = [];
 
     for (let i = 0; i < batchSize; i++) {
-      const { a, op, b, answer } = sampleInRange();
+      const { a, op, b, answer } = sampleInRange(this.filter);
       inputs.set(encodeFeatures(a, op, b), i * INPUT_DIM);
       targets[i] = answer;
       texts.push(describeExample(a, op, b, answer));
@@ -152,6 +165,11 @@ export class MathDataPipeline implements DataPipeline {
   constructor(stage: TrainingStage, dataset: Dataset = new ArithmeticDataset()) {
     this.stage = stage;
     this.dataset = dataset;
+  }
+
+  /** Expose the underlying dataset for UI size estimates. */
+  getDataset(): Dataset {
+    return this.dataset;
   }
 
   nextBatch(batchSize: number): Batch {

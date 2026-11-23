@@ -77,11 +77,20 @@ A useful classroom test: hold out all expressions that contain digit `7` in the 
 | Epochs | Train longer | More passes over 0–99; useless for ≥100 |
 | Hidden units | Capacity | Wider layers fit more of the table faster |
 
+## Making it “smarter” in this demo
+
+Use the UI presets:
+
+- **Model size** (Tiny→XL or custom hidden units): more parameters → more capacity. Watch the parameter count line.
+- **Dataset scale**: examples/epoch map to **tokens/epoch** (5 tokens per expression). Thin vs Rich changes how much signal each epoch sees.
+- **Held-out eval**: ones-digit **7** never appears in training batches. Each epoch reports held-out **accuracy** and **perplexity** (`exp(cross-entropy)`). If train perplexity crashes but held-out stays high, you memorized.
+- Probe `17 + 2` after a high train-acc run — that pattern was held out.
+
 ## What to try on the live page
 
-1. Read the **data feed** before and during Train.
-2. Train **Default**, try `12 + 34`, then `100 + 3` (OOD banner).
-3. Compare **Careful** vs **Spicy** curves and parameter Δ.
-4. Ask: if we wanted `100 + 3` to work, would you add a hundreds one-hot — or teach an algorithm?
+1. Read the **data feed** before and during Train; skim the held-out bank.
+2. Train Medium + Default data; compare train vs held-out perplexity on the chart.
+3. Bump to **Large** / **Rich** and see whether held-out improves or only train does.
+4. Try `12 + 34` (train-dist) vs `17 + 2` (held-out) vs `100 + 3` (OOD).
 
 **A model only learns the world you can represent — and only the objective you optimize.**

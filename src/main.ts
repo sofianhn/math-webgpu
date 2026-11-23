@@ -1,12 +1,14 @@
 import { WebGpuBackend } from "./webgpu";
 import { DEFAULT_HIDDEN, TinyMathMlp } from "./model";
 import {
+  ArithmeticDataset,
   CURRICULUM,
   INPUT_DIM,
   MAX_OPERAND,
   MathDataPipeline,
   NUM_CLASSES,
   OPS,
+  TOKENS_PER_EXAMPLE,
   computeAnswer,
   encodeFeatures,
   formatExpr,
@@ -17,11 +19,13 @@ import {
 import { MathTrainer } from "./trainer";
 import type { TrainMetrics } from "./types";
 import { renderCurves, renderDataFeed, renderNormBars, renderTopK } from "./viz";
+import { batchFromExprs, buildOnesDigitHoldout, evaluateModel, isHeldOut } from "./evals";
 
 const statusEl = document.querySelector("#status")!;
 const controlsEl = document.querySelector<HTMLElement>("#controls")!;
 const dataEl = document.querySelector<HTMLElement>("#data")!;
 const dataFeedEl = document.querySelector<HTMLElement>("#data-feed")!;
+const holdFeedEl = document.querySelector<HTMLElement>("#hold-feed")!;
 const internalsEl = document.querySelector<HTMLElement>("#internals")!;
 const logEl = document.querySelector("#log")!;
 const probeEl = document.querySelector<HTMLElement>("#probe")!;
@@ -34,29 +38,72 @@ const curvesEl = document.querySelector<SVGSVGElement>("#curves")!;
 const normsEl = document.querySelector<HTMLElement>("#norms")!;
 const topkEl = document.querySelector<HTMLElement>("#topk")!;
 const smartnessEl = document.querySelector("#smartness")!;
+const evalLineEl = document.querySelector("#eval-line")!;
 const progressEl = document.querySelector("#progress")!;
 const progressFill = document.querySelector<HTMLElement>("#progress-fill")!;
+const paramCountEl = document.querySelector("#param-count")!;
+const tokenCountEl = document.querySelector("#token-count")!;
 const epochsInput = document.querySelector<HTMLInputElement>("#epochs")!;
 const batchInput = document.querySelector<HTMLInputElement>("#batch")!;
+const examplesInput = document.querySelector<HTMLInputElement>("#examples")!;
 const lrInput = document.querySelector<HTMLInputElement>("#lr")!;
 const hiddenInput = document.querySelector<HTMLInputElement>("#hidden")!;
+const heldoutInput = document.querySelector<HTMLInputElement>("#heldout")!;
 const aInput = document.querySelector<HTMLInputElement>("#a")!;
 const bInput = document.querySelector<HTMLInputElement>("#b")!;
 
-/** Yield so the browser can paint curves/log between epochs. */
+const HOLDOUT_ONES = [7];
+
+const SIZE_PRESETS: Record<string, number> = {
+  tiny: 32,
+  small: 64,
+  medium: 96,
+  large: 192,
+  xlarge: 256,
+};
+
+const DATA_PRESETS: Record<string, number> = {
+  thin: 1024,
+  default: 2560,
+  rich: 5120,
+};
+
+const LR_PRESETS: Record<string, { epochs: number; lr: number }> = {
+  careful: { epochs: 80, lr: 0.001 },
+  default: { epochs: 40, lr: 0.01 },
+  spicy: { epochs: 30, lr: 0.08 },
+};
+
 function paint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 }
 
-const PRESETS: Record<string, { epochs: number; batch: number; lr: number; hidden: number }> = {
-  careful: { epochs: 100, batch: 32, lr: 0.001, hidden: 128 },
-  default: { epochs: 60, batch: 64, lr: 0.01, hidden: 96 },
-  spicy: { epochs: 35, batch: 64, lr: 0.08, hidden: 64 },
-};
-
 function log(line: string) {
   logEl.textContent += line + "\n";
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function estimateParams(hidden: number): number {
+  return INPUT_DIM * hidden + hidden + hidden * NUM_CLASSES + NUM_CLASSES;
+}
+
+function refreshCounts() {
+  const hidden = Math.max(16, Math.min(512, Number(hiddenInput.value) || DEFAULT_HIDDEN));
+  const batch = Math.max(4, Number(batchInput.value) || 64);
+  let examples = Math.max(batch, Number(examplesInput.value) || 2560);
+  // Snap examples to a multiple of batch for clean steps/epoch.
+  examples = Math.max(batch, Math.round(examples / batch) * batch);
+  examplesInput.value = String(examples);
+  const steps = examples / batch;
+  const tokens = examples * TOKENS_PER_EXAMPLE;
+  paramCountEl.textContent = `Parameters ≈ ${estimateParams(hidden).toLocaleString()}  (W1 ${INPUT_DIM}×${hidden} + b1 ${hidden} + W2 ${hidden}×${NUM_CLASSES} + b2 ${NUM_CLASSES})`;
+  tokenCountEl.textContent = `Tokens / epoch ≈ ${tokens.toLocaleString()}  (${examples.toLocaleString()} examples × ${TOKENS_PER_EXAMPLE} tokens · ${steps} steps × batch ${batch})`;
+}
+
+function setActive(group: string, name: string) {
+  document.querySelectorAll<HTMLButtonElement>(`[data-${group}]`).forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset[group] === name);
+  });
 }
 
 async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total: number }> {
@@ -70,40 +117,30 @@ async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total:
   return { ok, total: CURRICULUM.length };
 }
 
-function applyPreset(name: string) {
-  const p = PRESETS[name];
-  if (!p) return;
-  epochsInput.value = String(p.epochs);
-  batchInput.value = String(p.batch);
-  lrInput.value = String(p.lr);
-  hiddenInput.value = String(p.hidden);
-  document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.preset === name);
-  });
-}
-
 async function boot() {
   try {
     const gpu = await WebGpuBackend.create();
-    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Domain = operands <strong>0–${MAX_OPERAND}</strong> (two digits). Forward matmuls use the compute shader (CPU fallback if the driver disagrees).</p>`;
+    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Size presets + held-out perplexity evals enabled. Domain operands <strong>0–${MAX_OPERAND}</strong>.</p>`;
     controlsEl.hidden = false;
     dataEl.hidden = false;
     internalsEl.hidden = false;
     probeEl.hidden = false;
     renderCurves(curvesEl, []);
+    refreshCounts();
+
+    const holdExprs = buildOnesDigitHoldout(HOLDOUT_ONES, 200);
+    renderDataFeed(
+      holdFeedEl,
+      holdExprs.slice(0, 8).map(([a, op, b]) => {
+        const ans = computeAnswer(a, op, b);
+        return `${formatExpr(a, op, b, ans)}  ·  held-out (ones-digit 7)`;
+      }),
+      `Frozen held-out bank: ${holdExprs.length} expressions with ones-digit 7 (never used for gradients).`,
+    );
 
     let model = new TinyMathMlp(gpu, DEFAULT_HIDDEN);
     const trainer = new MathTrainer();
-    const pipeline = new MathDataPipeline("pretrain");
     let history: TrainMetrics[] = [];
-
-    // Show a sample of the data distribution before training.
-    const preview = pipeline.nextBatch(8);
-    renderDataFeed(
-      dataFeedEl,
-      preview.texts ?? [],
-      `Preview of random training rows (place-value features → answer class 0–${NUM_CLASSES - 1}):`,
-    );
 
     const smoke = await gpu.matmul(
       new Float32Array([1, 2, 3, 4]),
@@ -113,38 +150,94 @@ async function boot() {
       2,
     );
     const expected = [19, 22, 43, 50];
-    const ok2 = expected.every((v, i) => Math.abs(smoke[i] - v) < 1e-3);
-    const A = Float32Array.from({ length: 32 * INPUT_DIM }, (_, i) => ((i * 17) % 100) / 50 - 1);
-    const W = Float32Array.from({ length: INPUT_DIM * 96 }, (_, i) => ((i * 13) % 100) / 100 - 0.5);
-    await gpu.matmul(A, W, 32, INPUT_DIM, 96);
-    log(ok2 ? "GPU matmul smoke-test passed (2×2)." : `GPU matmul mismatch: ${Array.from(smoke)}`);
+    log(
+      expected.every((v, i) => Math.abs(smoke[i]! - v) < 1e-3)
+        ? "GPU matmul smoke-test passed (2×2)."
+        : `GPU matmul mismatch: ${Array.from(smoke)}`,
+    );
 
-    document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((btn) => {
-      btn.addEventListener("click", () => applyPreset(btn.dataset.preset!));
+    document.querySelectorAll<HTMLButtonElement>("[data-size]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.size!;
+        setActive("size", key);
+        if (key !== "custom" && SIZE_PRESETS[key] != null) {
+          hiddenInput.value = String(SIZE_PRESETS[key]);
+        }
+        refreshCounts();
+      });
     });
+    document.querySelectorAll<HTMLButtonElement>("[data-data]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.data!;
+        setActive("data", key);
+        if (key !== "custom" && DATA_PRESETS[key] != null) {
+          examplesInput.value = String(DATA_PRESETS[key]);
+        }
+        refreshCounts();
+      });
+    });
+    document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.preset!;
+        setActive("preset", key);
+        const p = LR_PRESETS[key];
+        if (p) {
+          epochsInput.value = String(p.epochs);
+          lrInput.value = String(p.lr);
+        }
+      });
+    });
+    for (const el of [hiddenInput, batchInput, examplesInput]) {
+      el.addEventListener("change", () => {
+        if (el === hiddenInput) setActive("size", "custom");
+        if (el === examplesInput || el === batchInput) setActive("data", "custom");
+        refreshCounts();
+      });
+    }
+
+    // Preview train distribution (with holdout filter if checked).
+    const previewFilter = (a: number, b: number) => !isHeldOut(a, b, HOLDOUT_ONES);
+    const previewPipe = new MathDataPipeline("pretrain", new ArithmeticDataset(previewFilter));
+    renderDataFeed(
+      dataFeedEl,
+      previewPipe.nextBatch(6).texts ?? [],
+      "Preview of train-distribution rows (held-out ones-digit 7 excluded when eval is on):",
+    );
 
     trainBtn.addEventListener("click", async () => {
       trainBtn.disabled = true;
       evalBtn.disabled = true;
       predictBtn.disabled = true;
       logEl.textContent = "";
+      refreshCounts();
+
       const epochs = Number(epochsInput.value);
-      const batchSize = Number(batchInput.value);
+      const batchSize = Math.max(4, Number(batchInput.value) || 64);
+      const examples = Math.max(batchSize, Number(examplesInput.value) || 2560);
+      const stepsPerEpoch = Math.max(1, Math.round(examples / batchSize));
       const learningRate = Number(lrInput.value);
-      const hidden = Math.max(16, Math.min(256, Number(hiddenInput.value) || DEFAULT_HIDDEN));
+      const hidden = Math.max(16, Math.min(512, Number(hiddenInput.value) || DEFAULT_HIDDEN));
       hiddenInput.value = String(hidden);
+      const useHeldout = heldoutInput.checked;
+
+      const trainFilter = useHeldout
+        ? (a: number, b: number) => !isHeldOut(a, b, HOLDOUT_ONES)
+        : undefined;
+      const pipeline = new MathDataPipeline("pretrain", new ArithmeticDataset(trainFilter));
+      const heldoutBatch = useHeldout ? batchFromExprs(holdExprs) : undefined;
 
       model = new TinyMathMlp(gpu, hidden);
       const beforeNorms = model.weightNorms();
       history = [];
       renderCurves(curvesEl, history);
       progressFill.style.width = "0%";
-      progressEl.textContent = `Starting… 0 / ${epochs} epochs`;
+      progressEl.textContent = `Starting… 0 / ${epochs}`;
+      evalLineEl.textContent = "";
       const fb0 = gpu.cpuFallbackCount;
+
       log(
-        `Pretrain start — epochs=${epochs} batch=${batchSize} lr=${learningRate} hidden=${hidden} · operands 0–${MAX_OPERAND} · ${INPUT_DIM}-D place-value features · ${NUM_CLASSES} answer classes`,
+        `Pretrain — H=${hidden} (~${estimateParams(hidden).toLocaleString()} params) · ${examples}/epoch · ${stepsPerEpoch} steps × batch ${batchSize} · ~${(examples * TOKENS_PER_EXAMPLE).toLocaleString()} tokens/epoch · lr=${learningRate} · held-out=${useHeldout ? "ones-digit 7" : "off"}`,
       );
-      log(`OOD note: 100+ (three digits) is outside the encoder — more epochs cannot invent a hundreds place.`);
       await paint();
 
       await trainer.train(model, pipeline, {
@@ -152,29 +245,25 @@ async function boot() {
         epochs,
         batchSize,
         learningRate,
+        stepsPerEpoch,
+        tokensPerExample: TOKENS_PER_EXAMPLE,
+        heldoutBatch,
         onMetrics: async (m) => {
           history.push(m);
-          const pctDone = (m.epoch / epochs) * 100;
-          progressFill.style.width = `${pctDone.toFixed(1)}%`;
-          progressEl.textContent = `Epoch ${m.epoch} / ${epochs} · loss ${m.loss.toFixed(4)} · acc ${(m.accuracy * 100).toFixed(1)}%`;
-          log(
-            `epoch ${m.epoch.toString().padStart(3)}  loss=${m.loss.toFixed(4)}  acc=${(m.accuracy * 100).toFixed(1)}%`,
-          );
-          renderCurves(curvesEl, history, {
-            title: `lr=${learningRate} · batch=${batchSize} · hidden=${hidden}`,
-          });
-
-          // Refresh the data feed with a fresh batch so you see what “training data” looks like.
+          progressFill.style.width = `${((m.epoch / epochs) * 100).toFixed(1)}%`;
+          progressEl.textContent = `Epoch ${m.epoch}/${epochs} · train loss ${m.loss.toFixed(3)} · ppl ${m.perplexity.toFixed(2)} · acc ${(m.accuracy * 100).toFixed(1)}% · ${m.tokens.toLocaleString()} tokens`;
+          let line = `epoch ${String(m.epoch).padStart(3)}  loss=${m.loss.toFixed(4)}  ppl=${m.perplexity.toFixed(2)}  acc=${(m.accuracy * 100).toFixed(1)}%`;
+          if (m.heldout) {
+            line += `  |  HOLD loss=${m.heldout.loss.toFixed(4)}  ppl=${m.heldout.perplexity.toFixed(2)}  acc=${(m.heldout.accuracy * 100).toFixed(1)}%`;
+            evalLineEl.textContent = `Held-out (unseen): perplexity ${m.heldout.perplexity.toFixed(2)} · acc ${(m.heldout.accuracy * 100).toFixed(1)}% on ${m.heldout.n} exprs (~${m.heldout.tokens} tokens)`;
+          }
+          log(line);
+          renderCurves(curvesEl, history, { title: `H=${hidden} · ${examples} ex/ep · lr=${learningRate}` });
           const live = pipeline.nextBatch(6);
-          renderDataFeed(
-            dataFeedEl,
-            live.texts ?? [],
-            `Live sample @ epoch ${m.epoch} (same distribution the optimizer just used):`,
-          );
-
+          renderDataFeed(dataFeedEl, live.texts ?? [], `Live train sample @ epoch ${m.epoch}:`);
           if (m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 5)) === 0) {
             const score = await curriculumScore(model);
-            smartnessEl.textContent = `Smartness @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
+            smartnessEl.textContent = `Curriculum @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
               (score.ok / score.total) *
               100
             ).toFixed(0)}%)`;
@@ -183,21 +272,23 @@ async function boot() {
         },
       });
 
-      const afterNorms = model.weightNorms();
-      renderNormBars(normsEl, beforeNorms, afterNorms);
-
+      renderNormBars(normsEl, beforeNorms, model.weightNorms());
       const score = await curriculumScore(model);
-      const pct = ((score.ok / score.total) * 100).toFixed(0);
-      smartnessEl.textContent = `Smartness (curriculum ${score.ok}/${score.total}): ${pct}% — try another preset and retrain to see how knobs change this.`;
-      progressEl.textContent = `Done · ${epochs} epochs · final loss ${history.at(-1)?.loss.toFixed(4) ?? "—"}`;
+      smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — compare train vs held-out perplexity to see if it got smarter or just memorized.`;
+      progressEl.textContent = `Done · ${epochs} epochs · final train ppl ${history.at(-1)?.perplexity.toFixed(2) ?? "—"}`;
       progressFill.style.width = "100%";
-
       const fb = gpu.cpuFallbackCount - fb0;
       log(`Pretrain finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
-      for (const [a, op, b] of CURRICULUM.slice(0, 4)) {
+      for (const [a, op, b] of [
+        [12, "+", 34],
+        [17, "+", 2],
+        [15, "*", 6],
+        [50, "-", 17],
+      ] as const) {
         const truth = computeAnswer(a, op, b);
         const { answer } = await model.predict(encodeFeatures(a, op, b));
-        log(`probe ${formatExpr(a, op, b)} → ${answer} (want ${truth})${answer === truth ? " ✓" : " ✗"}`);
+        const tag = isHeldOut(a, b, HOLDOUT_ONES) ? "HOLD" : "train-dist";
+        log(`probe [${tag}] ${formatExpr(a, op, b)} → ${answer} (want ${truth})${answer === truth ? " ✓" : " ✗"}`);
       }
 
       trainBtn.disabled = false;
@@ -207,8 +298,18 @@ async function boot() {
 
     evalBtn.addEventListener("click", async () => {
       evalBtn.disabled = true;
-      const { loss, accuracy } = await trainer.evaluate(model, pipeline, 15);
-      log(`eval  loss=${loss.toFixed(4)}  acc=${(accuracy * 100).toFixed(1)}%`);
+      const pipeline = new MathDataPipeline(
+        "pretrain",
+        new ArithmeticDataset(heldoutInput.checked ? (a, b) => !isHeldOut(a, b, HOLDOUT_ONES) : undefined),
+      );
+      const { loss, accuracy, perplexity } = await trainer.evaluate(model, pipeline, 15);
+      log(`eval train-dist  loss=${loss.toFixed(4)}  ppl=${perplexity.toFixed(2)}  acc=${(accuracy * 100).toFixed(1)}%`);
+      if (heldoutInput.checked) {
+        const held = await evaluateModel(model, batchFromExprs(holdExprs));
+        log(
+          `eval HOLD       loss=${held.loss.toFixed(4)}  ppl=${held.perplexity.toFixed(2)}  acc=${(held.accuracy * 100).toFixed(1)}%  n=${held.n}`,
+        );
+      }
       evalBtn.disabled = false;
     });
 
@@ -221,29 +322,23 @@ async function boot() {
       if (!inDomain(a, b)) {
         oodEl.hidden = false;
         const offender = isThreeDigitOrBeyond(a) ? a : b;
-        oodEl.textContent =
-          `${formatExpr(a, op, b)} is outside the trained domain (operands 0–${MAX_OPERAND}, two digits). ` +
-          `${offender} needs three or more digits — there is no hundreds place in the feature encoder. ` +
-          `More epochs will not help; the model never saw numbers ≥100. ` +
-          `Intrinsic arithmetic (generalizing past memorized place values) needs a different representation or algorithm — see the blog.`;
+        oodEl.textContent = `${formatExpr(a, op, b)} is OOD (need 0–${MAX_OPERAND}). ${offender} is outside the two-digit encoder.`;
         predictionEl.textContent = "";
         topkEl.innerHTML = "";
         return;
       }
-
       oodEl.hidden = true;
       const truth = computeAnswer(a, op, b);
       if (truth >= NUM_CLASSES) {
         oodEl.hidden = false;
-        oodEl.textContent = `Truth ${truth} exceeds the ${NUM_CLASSES} answer classes this demo classifies. Try smaller factors.`;
-        predictionEl.textContent = "";
-        topkEl.innerHTML = "";
+        oodEl.textContent = `Truth ${truth} exceeds ${NUM_CLASSES} answer classes.`;
         return;
       }
       const { answer, probs } = await model.predict(encodeFeatures(a, op, b));
+      const tag = isHeldOut(a, b, HOLDOUT_ONES) ? " [held-out pattern]" : "";
       predictionEl.textContent = `${formatExpr(a, op, b)} → model says ${answer} (truth ${truth})${
         answer === truth ? " ✓" : " ✗"
-      }`;
+      }${tag}`;
       renderTopK(topkEl, probs, 5);
     };
 

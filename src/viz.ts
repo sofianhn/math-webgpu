@@ -29,7 +29,9 @@ export function renderCurves(
 
   const losses = history.map((m) => m.loss);
   const accs = history.map((m) => m.accuracy);
-  const maxLoss = Math.max(...losses, 1e-6);
+  const holdLosses = history.map((m) => m.heldout?.loss ?? NaN);
+  const hasHold = history.some((m) => m.heldout);
+  const maxLoss = Math.max(...losses, ...holdLosses.filter((x) => Number.isFinite(x)), 1e-6);
   const n = history.length;
   const xAt = (i: number) => pad.l + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
   const yLoss = (v: number) => pad.t + ih - (v / maxLoss) * ih;
@@ -37,17 +39,29 @@ export function renderCurves(
 
   const lossPath = losses.map((v, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(1)},${yLoss(v).toFixed(1)}`).join(" ");
   const accPath = accs.map((v, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(1)},${yAcc(v).toFixed(1)}`).join(" ");
+  const holdPath = hasHold
+    ? holdLosses
+        .map((v, i) =>
+          Number.isFinite(v) ? `${i === 0 || !Number.isFinite(holdLosses[i - 1]!) ? "M" : "L"}${xAt(i).toFixed(1)},${yLoss(v).toFixed(1)}` : "",
+        )
+        .join(" ")
+    : "";
 
   const last = history[history.length - 1]!;
+  const holdBit = last.heldout
+    ? ` · hold ppl ${last.heldout.perplexity.toFixed(1)} acc ${(last.heldout.accuracy * 100).toFixed(0)}%`
+    : "";
   svg.innerHTML = `
     <text x="${pad.l}" y="16" fill="#1a1a18" font-size="12" font-weight="600">${opts?.title ?? "Training curves"}</text>
-    <text x="${W - pad.r}" y="16" text-anchor="end" fill="#5c5a52" font-size="11">epoch ${last.epoch} · loss ${last.loss.toFixed(3)} · acc ${(last.accuracy * 100).toFixed(0)}%</text>
+    <text x="${W - pad.r}" y="16" text-anchor="end" fill="#5c5a52" font-size="10">ep ${last.epoch} · ppl ${last.perplexity.toFixed(1)} · acc ${(last.accuracy * 100).toFixed(0)}%${holdBit}</text>
     <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${pad.t + ih}" stroke="#d9d2c3"/>
     <line x1="${pad.l}" y1="${pad.t + ih}" x2="${pad.l + iw}" y2="${pad.t + ih}" stroke="#d9d2c3"/>
     <path d="${lossPath}" fill="none" stroke="#0b6e4f" stroke-width="2"/>
+    ${hasHold ? `<path d="${holdPath}" fill="none" stroke="#5b4db0" stroke-width="2" stroke-dasharray="5 3"/>` : ""}
     <path d="${accPath}" fill="none" stroke="#b45a1a" stroke-width="2" stroke-dasharray="4 3"/>
-    <text x="${pad.l}" y="${H - 8}" fill="#0b6e4f" font-size="10">━ loss</text>
-    <text x="${pad.l + 52}" y="${H - 8}" fill="#b45a1a" font-size="10">╌ accuracy</text>
+    <text x="${pad.l}" y="${H - 8}" fill="#0b6e4f" font-size="10">━ train loss</text>
+    ${hasHold ? `<text x="${pad.l + 78}" y="${H - 8}" fill="#5b4db0" font-size="10">╌ held-out loss</text>` : ""}
+    <text x="${pad.l + (hasHold ? 178 : 78)}" y="${H - 8}" fill="#b45a1a" font-size="10">╌ train acc</text>
     <text x="${pad.l - 6}" y="${pad.t + 4}" text-anchor="end" fill="#5c5a52" font-size="9">${maxLoss.toFixed(2)}</text>
     <text x="${pad.l - 6}" y="${pad.t + ih}" text-anchor="end" fill="#5c5a52" font-size="9">0</text>
     <text x="${pad.l + iw + 6}" y="${pad.t + 4}" fill="#b45a1a" font-size="9">100%</text>

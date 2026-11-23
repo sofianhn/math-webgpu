@@ -94,12 +94,20 @@
           This demo’s classifier still will not invent a hundreds place for <code>100</code>.
         </p>
 
+        <h2>Making it “smarter” in this demo</h2>
+        <ul>
+          <li><strong>Model size</strong> (Tiny→XL or custom hidden units): more parameters → more capacity. Watch the parameter count line.</li>
+          <li><strong>Dataset scale</strong>: examples/epoch map to <strong>tokens/epoch</strong> (5 tokens per expression). Thin vs Rich changes how much signal each epoch sees.</li>
+          <li><strong>Held-out eval</strong>: ones-digit <strong>7</strong> never appears in training batches. Each epoch reports held-out <strong>accuracy</strong> and <strong>perplexity</strong> (<code>exp(cross-entropy)</code>). If train perplexity crashes but held-out stays high, you memorized.</li>
+          <li>Probe <code>17 + 2</code> after a high train-acc run — that pattern was held out.</li>
+        </ul>
+
         <h2>What to try</h2>
         <ol>
-          <li>Watch the <strong>data feed</strong> before and during Train.</li>
-          <li>Train Default, try <code>12 + 34</code>, then <code>100 + 3</code> (OOD).</li>
-          <li>Compare Careful vs Spicy curves and parameter Δ.</li>
-          <li>Ask whether <code>100 + 3</code> needs another one-hot — or an algorithm.</li>
+          <li>Read the <strong>data feed</strong> before and during Train; skim the held-out bank.</li>
+          <li>Train Medium + Default data; compare train vs held-out perplexity on the chart.</li>
+          <li>Bump to <strong>Large</strong> / <strong>Rich</strong> and see whether held-out improves or only train does.</li>
+          <li>Try <code>12 + 34</code> (train-dist) vs <code>17 + 2</code> (held-out) vs <code>100 + 3</code> (OOD).</li>
         </ol>
         <p>
           <strong>A model only learns the world you can represent — and only the objective you optimize.</strong>
