@@ -1,61 +1,87 @@
 # Teaching a browser to do arithmetic (badly, then better)
 
-*A walk through the Math WebGPU pretrain loop — what the model sees, what the knobs do, and why `3 + 50 → 6` is not a bug in the optimizer.*
+*A walk through the Math WebGPU pretrain loop — what the model sees, what the knobs do, why `3 + 50` used to look cursed, and when a net would learn arithmetic “for real.”*
 
 ---
 
-You open the page, hit **Train**, and watch loss fall. By epoch forty it looks almost smug. Then you type `3 + 50` and the model says something absurd like `6`.
+You hit **Train**, watch loss fall, then try an expression. Charts help. But two questions keep coming up:
 
-That moment is the point of this demo.
+1. What are those **parameter** bars counting?
+2. What **data** is this thing actually training on?
 
-## The curriculum is tiny on purpose
+And after we moved the default domain to **two-digit** numbers (0–99): at what point would the model learn arithmetic *intrinsically*, instead of memorizing pairs it saw?
 
-The network never sees “numbers” as integers. Each expression is a bag of **one-hot features**:
+## What data it trains on
 
-- digit `a` in `0…9` (10 slots)
-- operator `+ − × ÷` (4 slots)
-- digit `b` in `0…9` (10 slots)
+Each training row is a random expression:
 
-That is a 24-dimensional input. The answer is a **class** from `0…81` (enough room for `9 × 9`). Training draws random expressions from that closed world — four hundred unique inputs in total. A two-layer MLP with a few dozen hidden units can memorize the whole table.
+- operands **a, b ∈ {0…99}** (two digits)
+- operator in `{+, −, ×, ÷}`
+- target = the integer answer (products that would exceed 999 are resampled so they fit the classifier)
 
-So when loss hits ~0 and accuracy hits ~100%, the model is not “understanding arithmetic.” It is fitting a lookup table that happens to be arithmetic-shaped.
+The live **data feed** on the demo shows rows like:
 
-## Why more epochs will not fix `3 + 50`
+`12 + 34 = 46 · features a=1|2 op=+ b=3|4 → class 46`
 
-Digit `50` has **no feature slot**. Writing `x[50] = 1` into a length-24 vector is silently ignored in JavaScript typed arrays. The `b` one-hot stays all zeros. The network receives “three, plus, ???” — a pattern it never trained on.
+So you can see both the human expression and the feature breakdown.
 
-Extra epochs only revisit digits `0–9`. They cannot invent a column that does not exist. Out-of-distribution (OOD) failures are a **domain** problem, not a **learning-rate** problem.
+## How numbers are encoded (place value, not a flat ID)
 
-That is the first educational lesson: *optimization success on the training distribution does not transfer outside the feature scheme you chose.*
+We do **not** give the net a single one-hot over 100 values for `a`. We split each operand into **tens digit** and **ones digit** (10 + 10 slots), plus 4 operator slots, for both operands → **44 input features**.
 
-## What the knobs actually change
+That means `23` and `27` share the “tens = 2” feature. That is a tiny step toward structure — still a far cry from an addition algorithm.
 
-| Knob | What it feels like | What it really does |
+Answers are **classes 0…999**. The last layer is a giant “which integer?” softmax, not a calculator.
+
+## What the parameter tables are
+
+The knobs (learning rate, epochs, batch, hidden size) are **hyperparameters**: they steer *how* optimization runs.
+
+The bars labeled **W1 / b1 / W2 / b2** are the **model parameters** — the actual arrays of numbers being updated:
+
+| Table | Count (example, hidden=96) | Meaning |
 | --- | --- | --- |
-| **Learning rate** | Careful vs spicy presets | Step size for Adam. Too low → slow curves. Too high → jagged loss, brittle probes. |
-| **Batch size** | Steady vs noisy | Averaging of gradients. Smaller batches → noisier accuracy traces. |
-| **Epochs** | “Train longer” | More passes over the same 0–9 table. Helps until the curve flats; useless for OOD. |
-| **Hidden units** | Model capacity | Wider layers fit the table faster, but still cannot see digit 50. |
+| **W1** | 44 × 96 | connections from features → hidden units |
+| **b1** | 96 | bias per hidden unit |
+| **W2** | 96 × 1000 | connections from hidden → answer classes |
+| **b2** | 1000 | bias per answer class |
 
-The UI’s **smartness** score is curriculum accuracy on a fixed probe set (`3+5`, `2×4`, …). Retrain with **Careful**, **Default**, and **Spicy** and watch that percentage and the loss curve change. Same domain, different dynamics — that is “parameters affect smartness” in the only sense that matters here.
+The bar length is the table’s **L2 norm** (overall magnitude) before → after a train run. Δ tells you how hard that table got shoved. Count tells you how many knobs live in that table. Together they are the network’s **memory**, not the training schedule.
 
-## Training internals worth staring at
+## Why `100 + 3` (three digits) will not be fixed by more epochs
 
-**Loss & accuracy curves.** Loss should drop; accuracy should rise. If loss is flat near zero but probes fail, something else is wrong (we hit that earlier with flaky GPU matmuls — the app now cross-checks GEMMs against a CPU reference).
+The encoder only has tens and ones places. A value like `100` needs a **hundreds** place that does not exist. Features for that operand stay empty. Extra epochs only revisit 0–99. Out-of-distribution failures are a **representation** problem.
 
-**Weight L2 norms.** Bars compare parameter magnitudes before and after a run. You are watching the tables `W1`, `b1`, `W2`, `b2` move. A spicy learning rate often shoves norms farther; a careful run moves them gently.
+(When the demo was single-digit only, `3 + 50` failed for the same reason — `50` had no slot. Two-digit is now in-domain; three-digit is the new OOD wall.)
 
-**Top class probabilities.** On a probe, the softmax over answer classes is a confidence fingerprint. In-domain correct answers usually show a sharp peak; OOD inputs look diffuse or arbitrarily peaked on a wrong class.
+## At what point would it learn intrinsically?
 
-## The hybrid WebGPU path (one paragraph)
+**Short answer:** not with this setup alone — even at 100% train accuracy.
 
-Forward matmuls (`X @ W1`, `H @ W2`) run as a WGSL compute shader when the driver agrees with a CPU reference; bias, ReLU, softmax, cross-entropy, and backward stay on the CPU. That split keeps the demo honest: you still touch a real GPU kernel, but training remains correct on phones with eccentric WebGPU implementations.
+This model is trained as **input pattern → answer class**. With enough capacity and epochs it can memorize many (a, op, b) → answer maps. Place-value features may help it reuse digit patterns, but the loss never asks it to *execute* addition. It asks it to *name the right class*.
 
-## What to try next (as a reader)
+You start to get something closer to “intrinsic” arithmetic when at least one of these is true:
 
-1. Train with **Default**. Confirm `3 + 5` is right and `3 + 50` warns OOD.
-2. Switch to **Spicy**, retrain, compare curves and smartness.
-3. Drop learning rate to `0.001`, raise epochs, watch a slower climb.
-4. Ask: if we wanted `50` to work, what would we change — encoding, vocabulary, or task?
+1. **Representation** forces composition — e.g. digit-by-digit outputs, binary encodings, or continuous magnitudes with relational structure — *and* you evaluate on numbers / lengths never seen in training.
+2. **Supervision** teaches a procedure — scratchpads, chain-of-thought, or tool use (“call an adder”), not only the final integer.
+3. **Architecture** can run algorithms — RNNs/Transformers over digit sequences, program induction, or neurosymbolic stacks — then you measure **length / digit generalization**.
 
-The honest answer to that last question is the whole blog post in one line: **a model only learns the world you can represent.**
+A useful classroom test: hold out all expressions that contain digit `7` in the ones place, train on the rest, then probe `17 + 2`. If accuracy collapses, you memorized surface patterns. If it holds up *and* digit-level errors look like carry bugs, you may be seeing proto-rules. This demo’s classifier still will not invent a hundreds place for `100`.
+
+## What the knobs change (still true)
+
+| Knob | Feel | Reality |
+| --- | --- | --- |
+| Learning rate | Careful vs spicy | Adam step size |
+| Batch size | Steady vs noisy | Gradient averaging |
+| Epochs | Train longer | More passes over 0–99; useless for ≥100 |
+| Hidden units | Capacity | Wider layers fit more of the table faster |
+
+## What to try on the live page
+
+1. Read the **data feed** before and during Train.
+2. Train **Default**, try `12 + 34`, then `100 + 3` (OOD banner).
+3. Compare **Careful** vs **Spicy** curves and parameter Δ.
+4. Ask: if we wanted `100 + 3` to work, would you add a hundreds one-hot — or teach an algorithm?
+
+**A model only learns the world you can represent — and only the objective you optimize.**
