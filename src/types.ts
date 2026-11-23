@@ -69,7 +69,8 @@ export interface TrainerConfig {
   batchSize: number;
   learningRate: number;
   strategy?: StageStrategy;
-  onMetrics?: (m: TrainMetrics) => void;
+  /** Called after each epoch; may be async so the UI can paint mid-train. */
+  onMetrics?: (m: TrainMetrics) => void | Promise<void>;
 }
 
 export interface Trainer {

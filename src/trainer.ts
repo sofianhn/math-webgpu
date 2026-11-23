@@ -89,7 +89,7 @@ export class MathTrainer implements Trainer {
       };
       history.push(metrics);
       config.strategy?.onEpochEnd?.(metrics);
-      config.onMetrics?.(metrics);
+      await config.onMetrics?.(metrics);
     }
 
     return history;
