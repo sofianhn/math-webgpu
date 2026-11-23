@@ -47,7 +47,7 @@
         <h2>What the parameter tables are</h2>
         <p>
           Learning rate / epochs / batch / hidden size are <strong>hyperparameters</strong> (how
-          optimization runs). <strong>W1, b1, W2, b2</strong> are the <strong>model parameters</strong>
+          optimization runs). <strong>W1, b1, Wh/Wt/Wo</strong> are the <strong>model parameters</strong>
           — the arrays of numbers being updated:
         </p>
         <table>
@@ -57,8 +57,8 @@
           <tbody>
             <tr><td><strong>W1</strong></td><td>weights from input features → hidden units</td></tr>
             <tr><td><strong>b1</strong></td><td>bias per hidden unit</td></tr>
-            <tr><td><strong>W2</strong></td><td>weights from hidden → answer classes</td></tr>
-            <tr><td><strong>b2</strong></td><td>bias per answer class</td></tr>
+            <tr><td><strong>Wh / Wt / Wo</strong></td><td>hundreds / tens / ones digit heads</td></tr>
+            <tr><td><strong>bh / bt / bo</strong></td><td>digit biases</td></tr>
           </tbody>
         </table>
         <p>
@@ -89,9 +89,10 @@
           <li><strong>Architecture</strong> can run algorithms (sequence models over digits, program induction), then you measure length/digit generalization.</li>
         </ol>
         <p>
-          Classroom test: hold out all ones-digit <code>7</code>s, then probe <code>17 + 2</code>.
-          Collapse ⇒ memorized surface patterns. Stable digit-like errors ⇒ maybe proto-rules.
-          This demo’s classifier still will not invent a hundreds place for <code>100</code>.
+          Fair test: freeze exact expressions while keeping every digit in train — held-out
+          accuracy should be able to rise if digits compose. A harsh ones-digit-7 filter is a
+          different lesson (that input feature never fires). Digit heads still will not invent
+          a hundreds <em>input</em> place for <code>100</code>.
         </p>
 
         <h2>Making it learn math (not just memorize)</h2>
