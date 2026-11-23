@@ -11,8 +11,9 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Minimal in-browser pre-training for arithmetic (add / sub / mul / div)
-        with WebGPU matmul on the forward hot path.
+        Train a tiny MLP on digit arithmetic (0–9) in your browser. Tweak epochs,
+        batch size, and learning rate — watch loss, accuracy, and weight norms
+        move — then probe what it actually learned.
       </p>
 
       <section id="status" aria-live="polite">
@@ -20,9 +21,18 @@
       </section>
 
       <section id="controls" hidden>
+        <p class="hint">
+          Hyperparameters change <em>how</em> it learns, not <em>what domain</em>
+          it knows. The curriculum is only operands <strong>0–9</strong>.
+        </p>
+        <div class="presets" role="group" aria-label="Learning presets">
+          <button type="button" data-preset="careful" class="preset">Careful · lr 0.001</button>
+          <button type="button" data-preset="default" class="preset is-active">Default · lr 0.01</button>
+          <button type="button" data-preset="spicy" class="preset">Spicy · lr 0.08</button>
+        </div>
         <label>
           Epochs
-          <input id="epochs" type="number" min="1" max="200" value="60" />
+          <input id="epochs" type="number" min="1" max="300" value="40" />
         </label>
         <label>
           Batch size
@@ -32,14 +42,29 @@
           Learning rate
           <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.01" />
         </label>
+        <label>
+          Hidden units
+          <input id="hidden" type="number" min="16" max="256" step="16" value="96" />
+        </label>
         <button id="train" type="button">Train (pretrain)</button>
         <button id="eval" type="button" disabled>Evaluate</button>
       </section>
 
-      <section id="log" aria-label="Training log"></section>
+      <section id="internals" hidden>
+        <h2>Training internals</h2>
+        <p id="smartness" class="smartness" aria-live="polite">Smartness: not trained yet</p>
+        <svg id="curves" class="curves" xmlns="http://www.w3.org/2000/svg"></svg>
+        <h3 class="subhead">Weight L2 norms (before → after)</h3>
+        <div id="norms" class="norms" aria-live="polite"></div>
+        <section id="log" aria-label="Training log"></section>
+      </section>
 
       <section id="probe" hidden>
         <h2>Try an expression</h2>
+        <p class="hint">
+          Digits outside <strong>0–9</strong> were never in the training set.
+          Extra epochs will not invent them — that is out-of-distribution (OOD).
+        </p>
         <div class="row">
           <input id="a" type="number" min="0" max="9" value="3" />
           <select id="op">
@@ -51,7 +76,10 @@
           <input id="b" type="number" min="0" max="9" value="5" />
           <button id="predict" type="button">Predict</button>
         </div>
+        <p id="ood" class="ood" hidden></p>
         <p id="prediction"></p>
+        <h3 class="subhead">Top class probabilities</h3>
+        <div id="topk" class="topk"></div>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
