@@ -30,6 +30,15 @@ git clone https://github.com/sofianhn/math-webgpu.git
 cd math-webgpu
 ```
 
+
+## Live demo (GitHub Pages)
+
+After Pages is enabled (Settings → Pages → Source: **GitHub Actions**), the built site is at:
+
+**https://sofianhn.github.io/math-webgpu/**
+
+Open that HTTPS URL on a phone. WebGPU needs a supported browser (Safari 17+ on iOS, or Chrome/Edge with WebGPU). The repo is private: if the Pages site is not publicly reachable anonymously, sign in to GitHub on the phone or temporarily make the repo public.
+
 ## Layout
 
 ```
