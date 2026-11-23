@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Teaching a browser to do arithmetic — Math WebGPU</title>
+    <link rel="stylesheet" href="./blog.css" />
+  </head>
+  <body>
+    <main class="blog">
+      <p class="nav"><a href="./">← Back to the live demo</a> · <a href="./docs/training-the-tiny-math-mlp.md">Raw Markdown</a></p>
+      <article>
+        <h1>Teaching a browser to do arithmetic (badly, then better)</h1>
+        <p class="deck">
+          A walk through the Math WebGPU pretrain loop — what the model sees, what the knobs do,
+          and why <code>3 + 50 → 6</code> is not a bug in the optimizer.
+        </p>
+
+        <p>
+          You open the page, hit <strong>Train</strong>, and watch loss fall. By epoch forty it looks
+          almost smug. Then you type <code>3 + 50</code> and the model says something absurd like
+          <code>6</code>.
+        </p>
+        <p>That moment is the point of this demo.</p>
+
+        <h2>The curriculum is tiny on purpose</h2>
+        <p>The network never sees “numbers” as integers. Each expression is a bag of <strong>one-hot features</strong>:</p>
+        <ul>
+          <li>digit <code>a</code> in <code>0…9</code> (10 slots)</li>
+          <li>operator <code>+ − × ÷</code> (4 slots)</li>
+          <li>digit <code>b</code> in <code>0…9</code> (10 slots)</li>
+        </ul>
+        <p>
+          That is a 24-dimensional input. The answer is a <strong>class</strong> from
+          <code>0…81</code> (enough room for <code>9 × 9</code>). Training draws random expressions
+          from that closed world — four hundred unique inputs in total. A two-layer MLP with a few
+          dozen hidden units can memorize the whole table.
+        </p>
+        <p>
+          So when loss hits ~0 and accuracy hits ~100%, the model is not “understanding arithmetic.”
+          It is fitting a lookup table that happens to be arithmetic-shaped.
+        </p>
+
+        <h2>Why more epochs will not fix <code>3 + 50</code></h2>
+        <p>
+          Digit <code>50</code> has <strong>no feature slot</strong>. Writing
+          <code>x[50] = 1</code> into a length-24 vector is silently ignored in JavaScript typed
+          arrays. The <code>b</code> one-hot stays all zeros. The network receives “three, plus, ???”
+          — a pattern it never trained on.
+        </p>
+        <p>
+          Extra epochs only revisit digits <code>0–9</code>. They cannot invent a column that does
+          not exist. Out-of-distribution (OOD) failures are a <strong>domain</strong> problem, not a
+          <strong>learning-rate</strong> problem.
+        </p>
+        <p>
+          That is the first educational lesson:
+          <em>optimization success on the training distribution does not transfer outside the feature
+          scheme you chose.</em>
+        </p>
+
+        <h2>What the knobs actually change</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Knob</th>
+              <th>What it feels like</th>
+              <th>What it really does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Learning rate</strong></td>
+              <td>Careful vs spicy presets</td>
+              <td>Step size for Adam. Too low → slow curves. Too high → jagged loss, brittle probes.</td>
+            </tr>
+            <tr>
+              <td><strong>Batch size</strong></td>
+              <td>Steady vs noisy</td>
+              <td>Averaging of gradients. Smaller batches → noisier accuracy traces.</td>
+            </tr>
+            <tr>
+              <td><strong>Epochs</strong></td>
+              <td>“Train longer”</td>
+              <td>More passes over the same 0–9 table. Helps until the curve flats; useless for OOD.</td>
+            </tr>
+            <tr>
+              <td><strong>Hidden units</strong></td>
+              <td>Model capacity</td>
+              <td>Wider layers fit the table faster, but still cannot see digit 50.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The UI’s <strong>smartness</strong> score is curriculum accuracy on a fixed probe set
+          (<code>3+5</code>, <code>2×4</code>, …). Retrain with <strong>Careful</strong>,
+          <strong>Default</strong>, and <strong>Spicy</strong> and watch that percentage and the loss
+          curve change. Same domain, different dynamics — that is “parameters affect smartness” in the
+          only sense that matters here.
+        </p>
+
+        <h2>Training internals worth staring at</h2>
+        <p>
+          <strong>Loss &amp; accuracy curves.</strong> Loss should drop; accuracy should rise. If loss
+          is flat near zero but probes fail, something else is wrong (we hit that earlier with flaky
+          GPU matmuls — the app now cross-checks GEMMs against a CPU reference).
+        </p>
+        <p>
+          <strong>Weight L2 norms.</strong> Bars compare parameter magnitudes before and after a run.
+          You are watching the tables <code>W1</code>, <code>b1</code>, <code>W2</code>,
+          <code>b2</code> move. A spicy learning rate often shoves norms farther; a careful run moves
+          them gently.
+        </p>
+        <p>
+          <strong>Top class probabilities.</strong> On a probe, the softmax over answer classes is a
+          confidence fingerprint. In-domain correct answers usually show a sharp peak; OOD inputs look
+          diffuse or arbitrarily peaked on a wrong class.
+        </p>
+
+        <h2>The hybrid WebGPU path</h2>
+        <p>
+          Forward matmuls (<code>X @ W1</code>, <code>H @ W2</code>) run as a WGSL compute shader when
+          the driver agrees with a CPU reference; bias, ReLU, softmax, cross-entropy, and backward stay
+          on the CPU. That split keeps the demo honest: you still touch a real GPU kernel, but training
+          remains correct on phones with eccentric WebGPU implementations.
+        </p>
+
+        <h2>What to try next</h2>
+        <ol>
+          <li>Train with <strong>Default</strong>. Confirm <code>3 + 5</code> is right and <code>3 + 50</code> warns OOD.</li>
+          <li>Switch to <strong>Spicy</strong>, retrain, compare curves and smartness.</li>
+          <li>Drop learning rate to <code>0.001</code>, raise epochs, watch a slower climb.</li>
+          <li>Ask: if we wanted <code>50</code> to work, what would we change — encoding, vocabulary, or task?</li>
+        </ol>
+        <p>
+          The honest answer to that last question is the whole blog post in one line:
+          <strong>a model only learns the world you can represent.</strong>
+        </p>
+      </article>
+      <p class="nav footer"><a href="./">← Back to the live demo</a></p>
+    </main>
+  </body>
+</html>
