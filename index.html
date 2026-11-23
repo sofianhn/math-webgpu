@@ -3,10 +3,57 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Math WebGPU</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3EΣ%3C/text%3E%3C/svg%3E" />
+    <title>Math WebGPU — tiny arithmetic model</title>
+    <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <div id="app"></div>
+    <main>
+      <h1>Math WebGPU</h1>
+      <p class="lede">
+        Minimal in-browser pre-training for arithmetic (add / sub / mul / div)
+        with WebGPU matmul on the forward hot path.
+      </p>
+
+      <section id="status" aria-live="polite">
+        <p>Initializing WebGPU…</p>
+      </section>
+
+      <section id="controls" hidden>
+        <label>
+          Epochs
+          <input id="epochs" type="number" min="1" max="200" value="60" />
+        </label>
+        <label>
+          Batch size
+          <input id="batch" type="number" min="4" max="128" value="64" />
+        </label>
+        <label>
+          Learning rate
+          <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.01" />
+        </label>
+        <button id="train" type="button">Train (pretrain)</button>
+        <button id="eval" type="button" disabled>Evaluate</button>
+      </section>
+
+      <section id="log" aria-label="Training log"></section>
+
+      <section id="probe" hidden>
+        <h2>Try an expression</h2>
+        <div class="row">
+          <input id="a" type="number" min="0" max="9" value="3" />
+          <select id="op">
+            <option value="+">+</option>
+            <option value="-">−</option>
+            <option value="*">×</option>
+            <option value="/">÷</option>
+          </select>
+          <input id="b" type="number" min="0" max="9" value="5" />
+          <button id="predict" type="button">Predict</button>
+        </div>
+        <p id="prediction"></p>
+      </section>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

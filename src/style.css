@@ -1,0 +1,142 @@
+:root {
+  color-scheme: light;
+  --bg: #f3efe6;
+  --ink: #1a1a18;
+  --muted: #5c5a52;
+  --accent: #0b6e4f;
+  --panel: #fffdf8;
+  --line: #d9d2c3;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 10% 0%, #e8f2ec 0%, transparent 45%),
+    radial-gradient(circle at 90% 10%, #f7e9d8 0%, transparent 40%),
+    var(--bg);
+  color: var(--ink);
+}
+
+main {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+h1 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-weight: 600;
+  font-size: 2.25rem;
+  margin: 0 0 0.4rem;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 0 0 0.75rem;
+}
+
+.lede {
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+  line-height: 1.45;
+}
+
+#status,
+#controls,
+#probe,
+#log {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+}
+
+#controls {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+}
+
+#controls[hidden],
+#probe[hidden] {
+  display: none;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input,
+select,
+button {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  cursor: pointer;
+  grid-column: span 1;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#train,
+#eval {
+  margin-top: 0.2rem;
+}
+
+#log {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  min-height: 6rem;
+  max-height: 16rem;
+  overflow: auto;
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+#a,
+#b {
+  width: 4.5rem;
+}
+
+#prediction {
+  margin: 0.85rem 0 0;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  #controls {
+    grid-template-columns: 1fr;
+  }
+}
