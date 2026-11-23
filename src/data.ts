@@ -112,11 +112,13 @@ function sampleInRange(filter?: SampleFilter): { a: number; op: Op; b: number; a
     const answer = computeAnswer(a, op, b);
     if (answer < NUM_CLASSES) return { a, op, b, answer };
   }
-  // Fallback that always fits and usually passes ones-digit holdouts that exclude 7.
-  const a = Math.floor(Math.random() * 50);
-  const b = Math.floor(Math.random() * 50);
-  const op: Op = "+";
-  if (!filter || filter(a, b, op)) return { a, op, b, answer: a + b };
+  // Fallback that always fits class range; still respects filter when possible.
+  for (let a = 0; a <= 20; a++) {
+    for (let b = 0; b <= 20; b++) {
+      const op: Op = "+";
+      if (!filter || filter(a, b, op)) return { a, op, b, answer: a + b };
+    }
+  }
   return { a: 0, op: "+", b: 0, answer: 0 };
 }
 

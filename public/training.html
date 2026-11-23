@@ -94,20 +94,19 @@
           This demo’s classifier still will not invent a hundreds place for <code>100</code>.
         </p>
 
-        <h2>Making it “smarter” in this demo</h2>
+        <h2>Making it learn math (not just memorize)</h2>
         <ul>
-          <li><strong>Model size</strong> (Tiny→XL or custom hidden units): more parameters → more capacity. Watch the parameter count line.</li>
-          <li><strong>Dataset scale</strong>: examples/epoch map to <strong>tokens/epoch</strong> (5 tokens per expression). Thin vs Rich changes how much signal each epoch sees.</li>
-          <li><strong>Held-out eval</strong>: ones-digit <strong>7</strong> never appears in training batches. Each epoch reports held-out <strong>accuracy</strong> and <strong>perplexity</strong> (<code>exp(cross-entropy)</code>). If train perplexity crashes but held-out stays high, you memorized.</li>
-          <li>Probe <code>17 + 2</code> after a high train-acc run — that pattern was held out.</li>
+          <li><strong>Digit-wise answer head</strong>: predict hundreds / tens / ones, compose <code>100·H + 10·T + O</code> — not a flat 1000-way table.</li>
+          <li><strong>Fair expression holdout</strong>: freeze ~10% of exact expressions for eval, but keep every digit <strong>0–9</strong> in other training rows. (Ones-digit-7 holdout was a harsh probe that never activated that input feature.)</li>
+          <li>Watch train vs held-out accuracy: both rising ⇒ digit generalization; only train rising ⇒ still overfitting combinations.</li>
         </ul>
 
         <h2>What to try</h2>
         <ol>
-          <li>Read the <strong>data feed</strong> before and during Train; skim the held-out bank.</li>
-          <li>Train Medium + Default data; compare train vs held-out perplexity on the chart.</li>
-          <li>Bump to <strong>Large</strong> / <strong>Rich</strong> and see whether held-out improves or only train does.</li>
-          <li>Try <code>12 + 34</code> (train-dist) vs <code>17 + 2</code> (held-out) vs <code>100 + 3</code> (OOD).</li>
+          <li>Train Medium + Default with fair held-out on; watch hold accuracy climb.</li>
+          <li>Probe a train-dist sum and a frozen held-out expression from the bank.</li>
+          <li>Try <code>100 + 3</code> (OOD) — still no hundreds <em>input</em> place.</li>
+          <li>Check parameter tables for <strong>Wh / Wt / Wo</strong>, not a giant W2.</li>
         </ol>
         <p>
           <strong>A model only learns the world you can represent — and only the objective you optimize.</strong>
