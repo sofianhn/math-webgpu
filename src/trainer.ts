@@ -7,13 +7,15 @@ import type {
   TrainingStage,
 } from "./types";
 import { argmaxRow, crossEntropy, softmaxRows } from "./tensor";
+import { evaluateModel } from "./evals";
+import { TOKENS_PER_EXAMPLE } from "./data";
 
 const DEFAULT_STAGES: Record<TrainingStage, true> = {
   pretrain: true,
   finetune: true,
   rl: true,
 };
-void DEFAULT_STAGES; // documents intended stage keys for later strategies
+void DEFAULT_STAGES;
 
 /**
  * Training loop with a stage hook. Only pretrain is exercised today;
@@ -31,8 +33,8 @@ export class MathTrainer implements Trainer {
     }
 
     const history: TrainMetrics[] = [];
-    const stepsPerEpoch = 40;
-    // Lightweight Adam state keyed by parameter name (CPU); fine for this demo scale.
+    const stepsPerEpoch = config.stepsPerEpoch ?? 40;
+    const tokensPerExample = config.tokensPerExample ?? TOKENS_PER_EXAMPLE;
     const m = new Map<string, Float32Array>();
     const v = new Map<string, Float32Array>();
     let t = 0;
@@ -62,7 +64,7 @@ export class MathTrainer implements Trainer {
 
         const grads = model.backward(cache, batch.targets);
         t += 1;
-        const lrT = config.learningRate * Math.sqrt(1 - beta2 ** t) / (1 - beta1 ** t);
+        const lrT = (config.learningRate * Math.sqrt(1 - beta2 ** t)) / (1 - beta1 ** t);
         for (const { name, tensor: param } of model.parameters()) {
           const g = grads.get(name);
           if (!g) continue;
@@ -73,20 +75,30 @@ export class MathTrainer implements Trainer {
           const mt = m.get(name)!;
           const vt = v.get(name)!;
           for (let i = 0; i < param.data.length; i++) {
-            const gi = g.data[i];
-            mt[i] = beta1 * mt[i] + (1 - beta1) * gi;
-            vt[i] = beta2 * vt[i] + (1 - beta2) * gi * gi;
-            param.data[i] -= (lrT * mt[i]) / (Math.sqrt(vt[i]) + eps);
+            const gi = g.data[i]!;
+            mt[i] = beta1 * mt[i]! + (1 - beta1) * gi;
+            vt[i] = beta2 * vt[i]! + (1 - beta2) * gi * gi;
+            param.data[i]! -= (lrT * mt[i]!) / (Math.sqrt(vt[i]!) + eps);
           }
         }
       }
 
+      const meanLoss = lossSum / stepsPerEpoch;
       const metrics: TrainMetrics = {
         epoch,
-        loss: lossSum / stepsPerEpoch,
+        loss: meanLoss,
+        perplexity: Math.exp(meanLoss),
         accuracy: correct / total,
         stage: config.stage,
+        examples: total,
+        tokens: total * tokensPerExample,
       };
+
+      if (config.heldoutBatch && config.heldoutBatch.targets.length > 0) {
+        const held = await evaluateModel(model, config.heldoutBatch);
+        metrics.heldout = held;
+      }
+
       history.push(metrics);
       config.strategy?.onEpochEnd?.(metrics);
       await config.onMetrics?.(metrics);
@@ -99,7 +111,7 @@ export class MathTrainer implements Trainer {
     model: Model,
     pipeline: DataPipeline,
     batches = 10,
-  ): Promise<{ loss: number; accuracy: number }> {
+  ): Promise<{ loss: number; accuracy: number; perplexity: number }> {
     const batchSize = 64;
     let lossSum = 0;
     let correct = 0;
@@ -116,6 +128,7 @@ export class MathTrainer implements Trainer {
       total += B;
     }
 
-    return { loss: lossSum / batches, accuracy: correct / total };
+    const loss = lossSum / batches;
+    return { loss, accuracy: correct / total, perplexity: Math.exp(loss) };
   }
 }

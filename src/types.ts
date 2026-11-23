@@ -1,7 +1,7 @@
 /** Training stages the architecture is designed to support. Only pretrain is implemented. */
 export type TrainingStage = "pretrain" | "finetune" | "rl";
 
-/** Dense float32 tensor living in CPU memory (GPU buffers wrap these via GpuGpuBackend). */
+/** Dense float32 tensor living in CPU memory (GPU buffers wrap these via WebGpuBackend). */
 export interface Tensor {
   shape: readonly number[];
   data: Float32Array;
@@ -50,11 +50,27 @@ export interface Model {
   applyGradients(grads: Map<string, Tensor>, lr: number): void;
 }
 
+export interface EvalSliceMetrics {
+  loss: number;
+  perplexity: number;
+  accuracy: number;
+  n: number;
+  tokens: number;
+}
+
 export interface TrainMetrics {
   epoch: number;
   loss: number;
+  /** Train perplexity = exp(mean CE). */
+  perplexity: number;
   accuracy: number;
   stage: TrainingStage;
+  /** Examples seen this epoch (steps × batch). */
+  examples: number;
+  /** Tokens seen this epoch (examples × tokens/example). */
+  tokens: number;
+  /** Held-out eval the model never trained on (optional). */
+  heldout?: EvalSliceMetrics;
 }
 
 export interface StageStrategy {
@@ -68,6 +84,12 @@ export interface TrainerConfig {
   epochs: number;
   batchSize: number;
   learningRate: number;
+  /** Gradient steps per epoch (examples/epoch ≈ steps × batch). Default 40. */
+  stepsPerEpoch?: number;
+  /** Tokens counted per training example (for UI accounting). */
+  tokensPerExample?: number;
+  /** Optional held-out batch evaluated every epoch (never used for gradients). */
+  heldoutBatch?: Batch;
   strategy?: StageStrategy;
   /** Called after each epoch; may be async so the UI can paint mid-train. */
   onMetrics?: (m: TrainMetrics) => void | Promise<void>;
@@ -75,5 +97,5 @@ export interface TrainerConfig {
 
 export interface Trainer {
   train(model: Model, pipeline: DataPipeline, config: TrainerConfig): Promise<TrainMetrics[]>;
-  evaluate(model: Model, pipeline: DataPipeline, batches?: number): Promise<{ loss: number; accuracy: number }>;
+  evaluate(model: Model, pipeline: DataPipeline, batches?: number): Promise<{ loss: number; accuracy: number; perplexity: number }>;
 }
