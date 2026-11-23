@@ -3,7 +3,7 @@ import { WebGpuBackend } from "./webgpu";
 import { addBiasInPlace, randn, reluInPlace, softmaxRows, tensor, zeros } from "./tensor";
 import { INPUT_DIM, NUM_CLASSES } from "./data";
 
-const HIDDEN = 96;
+export const DEFAULT_HIDDEN = 96;
 
 /**
  * Tiny 2-layer MLP: input → ReLU(W1x+b1) → W2h+b2 → logits.
@@ -13,6 +13,7 @@ export class TinyMathMlp implements Model {
   readonly name = "tiny-math-mlp";
   readonly inputDim = INPUT_DIM;
   readonly numClasses = NUM_CLASSES;
+  readonly hidden: number;
 
   private readonly gpu: WebGpuBackend;
   private readonly W1: Tensor;
@@ -20,13 +21,23 @@ export class TinyMathMlp implements Model {
   private readonly W2: Tensor;
   private readonly b2: Tensor;
 
-  constructor(gpu: WebGpuBackend) {
+  constructor(gpu: WebGpuBackend, hidden = DEFAULT_HIDDEN) {
     this.gpu = gpu;
+    this.hidden = hidden;
     // Xavier-ish scales
-    this.W1 = randn([INPUT_DIM, HIDDEN], Math.sqrt(2 / INPUT_DIM));
-    this.b1 = zeros([HIDDEN]);
-    this.W2 = randn([HIDDEN, NUM_CLASSES], Math.sqrt(2 / HIDDEN));
+    this.W1 = randn([INPUT_DIM, hidden], Math.sqrt(2 / INPUT_DIM));
+    this.b1 = zeros([hidden]);
+    this.W2 = randn([hidden, NUM_CLASSES], Math.sqrt(2 / hidden));
     this.b2 = zeros([NUM_CLASSES]);
+  }
+
+  /** L2 norms per parameter tensor — useful for “how much did weights move?” viz. */
+  weightNorms(): { name: string; l2: number; count: number }[] {
+    return this.parameters().map(({ name, tensor: t }) => {
+      let s = 0;
+      for (let i = 0; i < t.data.length; i++) s += t.data[i] * t.data[i];
+      return { name, l2: Math.sqrt(s), count: t.data.length };
+    });
   }
 
   parameters() {
@@ -40,24 +51,25 @@ export class TinyMathMlp implements Model {
 
   async forward(inputs: Tensor): Promise<ForwardResult> {
     const [B, D] = inputs.shape;
+    const H = this.hidden;
     if (D !== INPUT_DIM) throw new Error(`expected inputDim ${INPUT_DIM}, got ${D}`);
 
     // h_pre = X @ W1
-    const hPreData = await this.gpu.matmul(inputs.data, this.W1.data, B, INPUT_DIM, HIDDEN);
-    addBiasInPlace(hPreData, B, HIDDEN, this.b1.data);
+    const hPreData = await this.gpu.matmul(inputs.data, this.W1.data, B, INPUT_DIM, H);
+    addBiasInPlace(hPreData, B, H, this.b1.data);
     const hData = hPreData.slice();
     reluInPlace(hData);
 
     // logits = H @ W2
-    const logitsData = await this.gpu.matmul(hData, this.W2.data, B, HIDDEN, NUM_CLASSES);
+    const logitsData = await this.gpu.matmul(hData, this.W2.data, B, H, NUM_CLASSES);
     addBiasInPlace(logitsData, B, NUM_CLASSES, this.b2.data);
 
     return {
       logits: tensor([B, NUM_CLASSES], logitsData),
       cache: {
         x: inputs,
-        hPre: tensor([B, HIDDEN], hPreData),
-        h: tensor([B, HIDDEN], hData),
+        hPre: tensor([B, H], hPreData),
+        h: tensor([B, H], hData),
         logits: tensor([B, NUM_CLASSES], logitsData),
       },
     };
@@ -69,6 +81,7 @@ export class TinyMathMlp implements Model {
     const hPre = cache.hPre;
     const logits = cache.logits;
     const [B] = x.shape;
+    const H = this.hidden;
 
     const probs = softmaxRows(logits.data, B, NUM_CLASSES);
     // dL/dlogits
@@ -77,11 +90,11 @@ export class TinyMathMlp implements Model {
     for (let i = 0; i < dLogits.length; i++) dLogits[i] /= B;
 
     // dW2 = H^T @ dLogits ; db2 = sum rows
-    const dW2 = zeros([HIDDEN, NUM_CLASSES]);
+    const dW2 = zeros([H, NUM_CLASSES]);
     const db2 = zeros([NUM_CLASSES]);
     for (let i = 0; i < B; i++) {
-      for (let k = 0; k < HIDDEN; k++) {
-        const hk = h.data[i * HIDDEN + k];
+      for (let k = 0; k < H; k++) {
+        const hk = h.data[i * H + k];
         for (let j = 0; j < NUM_CLASSES; j++) {
           const g = dLogits[i * NUM_CLASSES + j];
           dW2.data[k * NUM_CLASSES + j] += hk * g;
@@ -91,14 +104,14 @@ export class TinyMathMlp implements Model {
     }
 
     // dH = dLogits @ W2^T
-    const dH = new Float32Array(B * HIDDEN);
+    const dH = new Float32Array(B * H);
     for (let i = 0; i < B; i++) {
-      for (let k = 0; k < HIDDEN; k++) {
+      for (let k = 0; k < H; k++) {
         let s = 0;
         for (let j = 0; j < NUM_CLASSES; j++) {
           s += dLogits[i * NUM_CLASSES + j] * this.W2.data[k * NUM_CLASSES + j];
         }
-        dH[i * HIDDEN + k] = s;
+        dH[i * H + k] = s;
       }
     }
 
@@ -108,17 +121,17 @@ export class TinyMathMlp implements Model {
       if (hPre.data[i] <= 0) dHPre[i] = 0;
     }
 
-    const dW1 = zeros([INPUT_DIM, HIDDEN]);
-    const db1 = zeros([HIDDEN]);
+    const dW1 = zeros([INPUT_DIM, H]);
+    const db1 = zeros([H]);
     for (let i = 0; i < B; i++) {
       for (let d = 0; d < INPUT_DIM; d++) {
         const xd = x.data[i * INPUT_DIM + d];
-        for (let k = 0; k < HIDDEN; k++) {
-          const g = dHPre[i * HIDDEN + k];
-          dW1.data[d * HIDDEN + k] += xd * g;
+        for (let k = 0; k < H; k++) {
+          const g = dHPre[i * H + k];
+          dW1.data[d * H + k] += xd * g;
         }
       }
-      for (let k = 0; k < HIDDEN; k++) db1.data[k] += dHPre[i * HIDDEN + k];
+      for (let k = 0; k < H; k++) db1.data[k] += dHPre[i * H + k];
     }
 
     return new Map([
