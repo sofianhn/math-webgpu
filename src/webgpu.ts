@@ -47,7 +47,21 @@ function padBytes(nbytes: number): number {
   return Math.max(16, Math.ceil(nbytes / 16) * 16);
 }
 
-export class WebGpuBackend {
+/** Minimal matmul surface used by TinyMathMlp (GPU or CPU). */
+export interface MatmulBackend {
+  cpuFallbackCount: number;
+  matmul(A: Float32Array, B: Float32Array, M: number, K: number, N: number): Promise<Float32Array>;
+}
+
+/** CPU-only backend for sweeps / environments without WebGPU. */
+export class CpuBackend implements MatmulBackend {
+  cpuFallbackCount = 0;
+  async matmul(A: Float32Array, B: Float32Array, M: number, K: number, N: number): Promise<Float32Array> {
+    return cpuMatmul(A, B, M, K, N);
+  }
+}
+
+export class WebGpuBackend implements MatmulBackend {
   readonly device: GPUDevice;
   private readonly matmulPipeline: GPUComputePipeline;
   /** Serialize matmuls so concurrent train/predict cannot race the queue. */

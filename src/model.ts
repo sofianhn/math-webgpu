@@ -1,5 +1,5 @@
 import type { ForwardResult, Model, Tensor } from "./types";
-import { WebGpuBackend } from "./webgpu";
+import type { MatmulBackend } from "./webgpu";
 import { addBiasInPlace, randn, reluInPlace, softmaxRows, tensor, zeros } from "./tensor";
 import { INPUT_DIM, NUM_CLASSES } from "./data";
 
@@ -21,7 +21,7 @@ export class TinyMathMlp implements Model {
   readonly numClasses = NUM_CLASSES;
   readonly hidden: number;
 
-  private readonly gpu: WebGpuBackend;
+  private readonly gpu: MatmulBackend;
   private readonly W1: Tensor;
   private readonly b1: Tensor;
   /** Hundreds / tens / ones heads. */
@@ -32,7 +32,7 @@ export class TinyMathMlp implements Model {
   private readonly Wo: Tensor;
   private readonly bo: Tensor;
 
-  constructor(gpu: WebGpuBackend, hidden = DEFAULT_HIDDEN) {
+  constructor(gpu: MatmulBackend, hidden = DEFAULT_HIDDEN) {
     this.gpu = gpu;
     this.hidden = hidden;
     this.W1 = randn([INPUT_DIM, hidden], Math.sqrt(2 / INPUT_DIM));

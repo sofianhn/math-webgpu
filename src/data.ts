@@ -89,7 +89,7 @@ export function describeExample(a: number, op: Op, b: number, answer: number): s
   return `${formatExpr(a, op, b, answer)}  ·  features a=${at}|${ao} op=${op} b=${bt}|${bo}  → class ${answer}`;
 }
 
-/** Fixed curriculum probes (mix of 1- and 2-digit) for the smartness scoreboard. */
+/** Fixed curriculum probes — easy + hard (carry / mul) for the smartness scoreboard. */
 export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
   [3, "+", 5],
   [12, "+", 34],
@@ -97,8 +97,10 @@ export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
   [50, "-", 17],
   [84, "/", 4],
   [7, "*", 7],
-  [99, "+", 1],
-  [40, "/", 8],
+  [47, "+", 38],
+  [17, "*", 19],
+  [99, "+", 99],
+  [25, "*", 25],
 ];
 
 export type SampleFilter = (a: number, b: number, op: Op) => boolean;

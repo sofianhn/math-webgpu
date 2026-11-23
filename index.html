@@ -11,9 +11,9 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Teach a browser MLP to <strong>compose digit answers</strong> (hundreds / tens / ones),
-        not just memorize a 1000-way table — with a <strong>fair held-out</strong> of frozen
-        expressions (all digits still appear in training).
+        Hit <strong>Train</strong> with the default <strong>Ninja</strong> settings — tuned to
+        actually get strong at two-digit arithmetic (held-out ~90% in sweeps), including hard
+        carries and multiplies. Or switch to <strong>Simple</strong> for a faster pass.
         <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
@@ -22,69 +22,52 @@
       </section>
 
       <section id="controls" hidden>
-        <p class="hint">
-          Domain = operands <strong>0–99</strong>. The model predicts answer
-          <strong>digits</strong> then composes them. Fair held-out freezes ~10% of exact
-          expressions — every digit <strong>0–9</strong> still shows up in other training rows.
-          Perplexity = <code>exp(cross-entropy)</code>.
+        <h3 class="subhead">Mode</h3>
+        <div class="presets mode-presets" role="group" aria-label="Training mode">
+          <button type="button" data-mode="simple" class="preset">Simple · fast</button>
+          <button type="button" data-mode="ninja" class="preset is-active">Ninja · strong math</button>
+        </div>
+        <p id="mode-blurb" class="hint">
+          Ninja is the default — more hidden units, more examples/epoch, longer train. Empirically
+          chosen for hard mul/carry probes.
         </p>
 
-        <h3 class="subhead">Model size (parameter count)</h3>
-        <div class="presets" role="group" aria-label="Model size presets">
-          <button type="button" data-size="tiny" class="preset">Tiny · H32</button>
-          <button type="button" data-size="small" class="preset">Small · H64</button>
-          <button type="button" data-size="medium" class="preset is-active">Medium · H96</button>
-          <button type="button" data-size="large" class="preset">Large · H192</button>
-          <button type="button" data-size="xlarge" class="preset">XL · H256</button>
-          <button type="button" data-size="custom" class="preset">Custom</button>
-        </div>
-        <label>
-          Hidden units (custom)
-          <input id="hidden" type="number" min="16" max="512" step="8" value="96" />
-        </label>
-        <p id="param-count" class="hint param-count">Parameters: —</p>
-
-        <h3 class="subhead">Dataset scale (per token)</h3>
-        <p class="hint">
-          Each expression = <strong>5 tokens</strong> (a_tens, a_ones, op, b_tens, b_ones).
-          Tokens/epoch ≈ examples/epoch × 5.
-        </p>
-        <div class="presets" role="group" aria-label="Dataset scale presets">
-          <button type="button" data-data="thin" class="preset">Thin · 1k ex/ep</button>
-          <button type="button" data-data="default" class="preset is-active">Default · 2.5k</button>
-          <button type="button" data-data="rich" class="preset">Rich · 5k</button>
-          <button type="button" data-data="custom" class="preset">Custom</button>
-        </div>
-        <label>
-          Examples / epoch
-          <input id="examples" type="number" min="128" max="20000" step="64" value="2560" />
-        </label>
-        <label>
-          Batch size
-          <input id="batch" type="number" min="4" max="256" value="64" />
-        </label>
-        <p id="token-count" class="hint param-count">Tokens / epoch: —</p>
-
-        <h3 class="subhead">Optimization</h3>
-        <div class="presets" role="group" aria-label="Learning presets">
-          <button type="button" data-preset="careful" class="preset">Careful · lr 0.001</button>
-          <button type="button" data-preset="default" class="preset is-active">Default · lr 0.01</button>
-          <button type="button" data-preset="spicy" class="preset">Spicy · lr 0.08</button>
-        </div>
-        <label>
-          Epochs
-          <input id="epochs" type="number" min="1" max="300" value="40" />
-        </label>
-        <label>
-          Learning rate
-          <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.01" />
-        </label>
         <label class="check">
           <input id="heldout" type="checkbox" checked />
           Fair held-out each epoch (~10% frozen expressions; all digits stay in train)
         </label>
         <button id="train" type="button">Train (pretrain)</button>
         <button id="eval" type="button" disabled>Evaluate train-dist</button>
+
+        <details class="advanced">
+          <summary>Advanced knobs (filled by Simple / Ninja)</summary>
+          <p class="hint">
+            Domain = operands <strong>0–99</strong>. Digit-wise answer heads compose
+            hundreds / tens / ones. Tweaking these leaves Mode on “custom.”
+          </p>
+          <label>
+            Hidden units
+            <input id="hidden" type="number" min="16" max="512" step="8" value="256" />
+          </label>
+          <label>
+            Examples / epoch
+            <input id="examples" type="number" min="128" max="20000" step="64" value="10240" />
+          </label>
+          <label>
+            Batch size
+            <input id="batch" type="number" min="4" max="256" value="64" />
+          </label>
+          <label>
+            Epochs
+            <input id="epochs" type="number" min="1" max="300" value="150" />
+          </label>
+          <label>
+            Learning rate
+            <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.005" />
+          </label>
+          <p id="param-count" class="hint param-count">Parameters: —</p>
+          <p id="token-count" class="hint param-count">Tokens / epoch: —</p>
+        </details>
       </section>
 
       <section id="data" hidden>
@@ -104,7 +87,7 @@
 
       <section id="internals" hidden>
         <h2>Training internals</h2>
-        <p id="progress" class="progress" aria-live="polite">Idle — hit Train to follow loss, perplexity &amp; held-out live.</p>
+        <p id="progress" class="progress" aria-live="polite">Idle — hit Train (Ninja default) to follow loss, perplexity &amp; held-out live.</p>
         <div class="progress-track" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
         <p id="smartness" class="smartness" aria-live="polite">Smartness: not trained yet</p>
         <p id="eval-line" class="eval-line" aria-live="polite"></p>
@@ -112,7 +95,7 @@
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
         <p class="hint">
           Count = how many numbers in that table. Bars = magnitude before → after.
-          Heads are <strong>Wh / Wt / Wo</strong> (hundreds / tens / ones), not a giant W2.
+          Heads are <strong>Wh / Wt / Wo</strong> (hundreds / tens / ones).
         </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>
@@ -121,19 +104,18 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          In-domain: <strong>0–99</strong>. After training, try a train-dist sum and a
-          held-out expression from the bank. Digit heads should generalize better than a
-          flat 1000-way classifier — still not a true calculator.
+          After Ninja training, try hard probes like <code>47 + 38</code>, <code>17 × 19</code>,
+          <code>25 × 25</code>, and a frozen held-out expression from the bank.
         </p>
         <div class="row">
-          <input id="a" type="number" min="0" max="999" value="12" />
+          <input id="a" type="number" min="0" max="999" value="47" />
           <select id="op">
             <option value="+">+</option>
             <option value="-">−</option>
-            <option value="*">×</option>
+            <option value="*" selected>×</option>
             <option value="/">÷</option>
           </select>
-          <input id="b" type="number" min="0" max="999" value="34" />
+          <input id="b" type="number" min="0" max="999" value="19" />
           <button id="predict" type="button">Predict</button>
         </div>
         <p id="ood" class="ood" hidden></p>

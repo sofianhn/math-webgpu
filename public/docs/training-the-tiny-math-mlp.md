@@ -81,21 +81,27 @@ A useful classroom test: hold out all expressions that contain digit `7` in the 
 
 ## Making it learn math (not just memorize)
 
-Two changes matter more than “make H bigger”:
+Two architecture changes matter more than “make H bigger”:
 
-1. **Digit-wise answer head** — the net predicts hundreds / tens / ones of the answer and composes `100·H + 10·T + O`, instead of a flat softmax over 1000 class IDs. That forces place-value structure in the *output*.
-2. **Fair expression holdout** — freeze ~10% of exact `(a, op, b)` triples for eval, but keep **every digit 0–9** in other training rows. (Holding out all ones-digit **7**s was a harsh classroom probe: that input feature never fired, so 0% hold accuracy was almost guaranteed.)
+1. **Digit-wise answer head** — predict hundreds / tens / ones, compose `100·H + 10·T + O`.
+2. **Fair expression holdout** — freeze ~10% of exact expressions; keep every digit 0–9 in train.
 
-Also still useful:
+### Simple vs Ninja (the defaults that matter)
 
-- **Model size** / **dataset scale** / **LR presets** — capacity and signal per epoch.
-- Watch **train vs held-out** accuracy. If both rise, digits are generalizing. If only train rises, you’re still overfitting combinations.
+Swept on CPU with fair held-out + fixed easy/hard probes (`scripts/sweep-*.ts`):
+
+| Mode | Hidden | Epochs | LR | Examples/epoch | Typical held-out | Hard probes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Simple** | 112 | 55 | 0.01 | 3072 | ~83% | ~50% |
+| **Ninja** (page default) | 256 | 150 | 0.005 | 10240 | ~90% | ~83% |
+
+Ninja is slower (a few minutes on phones) and is meant to look *actually good* on carries and multiplies like `47+38`, `17×19`, `25×25`.
 
 ## What to try on the live page
 
-1. Train Medium + Default with fair held-out on; watch hold accuracy climb (not explode in perplexity alone).
-2. Probe a train-dist sum and a frozen held-out expression from the bank.
-3. Try `100 + 3` (OOD) — digit heads still can’t invent a hundreds *input* place.
-4. Compare parameter tables: you should see **Wh / Wt / Wo**, not a giant W2.
+1. Leave **Ninja** selected, hit Train, wait for held-out accuracy to climb toward ~90%.
+2. Probe `47 + 38`, `17 × 19`, `25 × 25`, plus a frozen held-out row.
+3. Switch to **Simple** for a faster ~80% held-out pass.
+4. Try `100 + 3` (OOD) — still no hundreds *input* place.
 
 **A model only learns the world you can represent — and only the objective you optimize.**
