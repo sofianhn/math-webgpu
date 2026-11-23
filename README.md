@@ -4,6 +4,12 @@ Minimal TypeScript + WebGPU project: a tiny MLP learns basic arithmetic (add / s
 
 Architecture is staged for **pretrain → finetune → rl**. Only **pretrain** (synthetic arithmetic → answer classification) is implemented; interfaces leave clear plug-in points for the later stages.
 
+## Live demo (GitHub Pages)
+
+**https://sofianhn.github.io/math-webgpu/**
+
+Digits **0–9** only. Expressions like `3 + 50` are out of distribution — more epochs will not help. See the training blog: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md).
+
 ## Requirements
 
 - **Node.js** 18+ (for Vite)
@@ -31,28 +37,22 @@ cd math-webgpu
 ```
 
 
-## Live demo (GitHub Pages)
-
-After Pages is enabled (Settings → Pages → Source: **GitHub Actions**), the built site is at:
-
-**https://sofianhn.github.io/math-webgpu/**
-
-Open that HTTPS URL on a phone. WebGPU needs a supported browser (Safari 17+ on iOS, or Chrome/Edge with WebGPU). The repo is private: if the Pages site is not publicly reachable anonymously, sign in to GitHub on the phone or temporarily make the repo public.
-
 ## Layout
 
 ```
 math-webgpu/
-  index.html          Demo UI
+  index.html          Demo UI (presets, curves, OOD probe)
+  docs/training-the-tiny-math-mlp.md
   package.json
   tsconfig.json
   vite.config.ts
   README.md
   src/
-    main.ts           Boot WebGPU, wire train / eval / predict
+    main.ts           Boot WebGPU, wire train / eval / predict / viz
+    viz.ts            Loss/acc curves, weight norms, top-k probs
     style.css
     types.ts          Model / Dataset / Trainer / TrainingStage interfaces
-    tensor.ts         CPU tensor helpers (softmax, CE, ReLU)
+    tensor.ts         CPU tensor helpers (softmax, CE, ReLU, matmul)
     webgpu.ts         navigator.gpu init + matmul compute shader
     data.ts           Synthetic arithmetic Dataset + DataPipeline
     model.ts          TinyMathMlp (GPU forward GEMM, CPU backward)
