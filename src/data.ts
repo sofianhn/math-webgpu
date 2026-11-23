@@ -28,11 +28,32 @@ export function computeAnswer(a: number, op: Op, b: number): number {
  */
 export const INPUT_DIM = MAX_OPERAND + 1 + OPS.length + MAX_OPERAND + 1;
 
+/** True when both operands are in the trained digit range 0..MAX_OPERAND. */
+export function inDomain(a: number, b: number): boolean {
+  return (
+    Number.isInteger(a) &&
+    Number.isInteger(b) &&
+    a >= 0 &&
+    a <= MAX_OPERAND &&
+    b >= 0 &&
+    b <= MAX_OPERAND
+  );
+}
+
+export function clampDigit(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(MAX_OPERAND, Math.trunc(n)));
+}
+
+/**
+ * Encode one-hots. Out-of-range operands leave that slot empty (all zeros) —
+ * the network never saw those digits, so predictions are meaningless (educational OOD).
+ */
 export function encodeFeatures(a: number, op: Op, b: number): Float32Array {
   const x = new Float32Array(INPUT_DIM);
-  x[a] = 1;
+  if (a >= 0 && a <= MAX_OPERAND) x[a] = 1;
   x[MAX_OPERAND + 1 + OPS.indexOf(op)] = 1;
-  x[MAX_OPERAND + 1 + OPS.length + b] = 1;
+  if (b >= 0 && b <= MAX_OPERAND) x[MAX_OPERAND + 1 + OPS.length + b] = 1;
   return x;
 }
 
@@ -41,6 +62,18 @@ export function formatExpr(a: number, op: Op, b: number, answer?: number): strin
   const base = `${a} ${sym} ${b}`;
   return answer === undefined ? base : `${base} = ${answer}`;
 }
+
+/** Fixed curriculum probes used for the “smartness” scoreboard. */
+export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
+  [3, "+", 5],
+  [2, "*", 4],
+  [9, "-", 3],
+  [8, "/", 2],
+  [0, "+", 0],
+  [7, "*", 7],
+  [1, "-", 9],
+  [6, "/", 3],
+];
 
 /** Synthetic arithmetic dataset for pre-training (direct answer classification). */
 export class ArithmeticDataset implements Dataset {
