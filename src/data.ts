@@ -4,10 +4,15 @@ import { tensor } from "./tensor";
 export const OPS = ["+", "-", "*", "/"] as const;
 export type Op = (typeof OPS)[number];
 
-/** Operands 0–9; answers mapped into classes 0..NUM_CLASSES-1 (clamped). */
-export const MAX_OPERAND = 9;
-/** Cover mul (81) and keep room; classes are answer values 0..NUM_CLASSES-1. */
-export const NUM_CLASSES = 82;
+/**
+ * Two-digit operands 0–99 (default curriculum).
+ * Three-digit values (≥100) are out of distribution.
+ */
+export const MAX_OPERAND = 99;
+/** Max answer class (mul is resampled until answer fits). */
+export const NUM_CLASSES = 1000;
+
+const DIGIT_SLOTS = 10; // tens or ones place: digits 0–9
 
 export function computeAnswer(a: number, op: Op, b: number): number {
   switch (op) {
@@ -23,12 +28,13 @@ export function computeAnswer(a: number, op: Op, b: number): number {
 }
 
 /**
- * Feature encoding: one-hot(a) + one-hot(op) + one-hot(b).
- * inputDim = 10 + 4 + 10 = 24. Small enough for a demo MLP.
+ * Place-value one-hots: tens(a)+ones(a)+op+tens(b)+ones(b).
+ * inputDim = 10+10+4+10+10 = 44.
+ * Unlike a flat one-hot over 0–99, this shares digit features across numbers
+ * (e.g. 23 and 27 share “tens=2”) — still not a true arithmetic algorithm.
  */
-export const INPUT_DIM = MAX_OPERAND + 1 + OPS.length + MAX_OPERAND + 1;
+export const INPUT_DIM = DIGIT_SLOTS + DIGIT_SLOTS + OPS.length + DIGIT_SLOTS + DIGIT_SLOTS;
 
-/** True when both operands are in the trained digit range 0..MAX_OPERAND. */
 export function inDomain(a: number, b: number): boolean {
   return (
     Number.isInteger(a) &&
@@ -40,20 +46,28 @@ export function inDomain(a: number, b: number): boolean {
   );
 }
 
-export function clampDigit(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(MAX_OPERAND, Math.trunc(n)));
+/** True when a value needs 3+ digits (or is negative / non-integer). */
+export function isThreeDigitOrBeyond(n: number): boolean {
+  return !Number.isInteger(n) || n < 0 || n > MAX_OPERAND;
+}
+
+function encodeOperand(x: Float32Array, offset: number, value: number): void {
+  if (value < 0 || value > MAX_OPERAND) return;
+  const tens = Math.floor(value / 10);
+  const ones = value % 10;
+  x[offset + tens] = 1;
+  x[offset + DIGIT_SLOTS + ones] = 1;
 }
 
 /**
- * Encode one-hots. Out-of-range operands leave that slot empty (all zeros) —
- * the network never saw those digits, so predictions are meaningless (educational OOD).
+ * Encode place-value features. Out-of-range operands leave empty digit slots —
+ * the net never trained on 3-digit numbers, so those predictions are meaningless.
  */
 export function encodeFeatures(a: number, op: Op, b: number): Float32Array {
   const x = new Float32Array(INPUT_DIM);
-  if (a >= 0 && a <= MAX_OPERAND) x[a] = 1;
-  x[MAX_OPERAND + 1 + OPS.indexOf(op)] = 1;
-  if (b >= 0 && b <= MAX_OPERAND) x[MAX_OPERAND + 1 + OPS.length + b] = 1;
+  encodeOperand(x, 0, a);
+  x[DIGIT_SLOTS * 2 + OPS.indexOf(op)] = 1;
+  encodeOperand(x, DIGIT_SLOTS * 2 + OPS.length, b);
   return x;
 }
 
@@ -63,23 +77,47 @@ export function formatExpr(a: number, op: Op, b: number, answer?: number): strin
   return answer === undefined ? base : `${base} = ${answer}`;
 }
 
-/** Fixed curriculum probes used for the “smartness” scoreboard. */
+/** Human-readable description of one training example’s features. */
+export function describeExample(a: number, op: Op, b: number, answer: number): string {
+  const at = Math.floor(a / 10);
+  const ao = a % 10;
+  const bt = Math.floor(b / 10);
+  const bo = b % 10;
+  return `${formatExpr(a, op, b, answer)}  ·  features a=${at}|${ao} op=${op} b=${bt}|${bo}  → class ${answer}`;
+}
+
+/** Fixed curriculum probes (mix of 1- and 2-digit) for the smartness scoreboard. */
 export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
   [3, "+", 5],
-  [2, "*", 4],
-  [9, "-", 3],
-  [8, "/", 2],
-  [0, "+", 0],
+  [12, "+", 34],
+  [15, "*", 6],
+  [50, "-", 17],
+  [84, "/", 4],
   [7, "*", 7],
-  [1, "-", 9],
-  [6, "/", 3],
+  [99, "+", 1],
+  [40, "/", 8],
 ];
 
-/** Synthetic arithmetic dataset for pre-training (direct answer classification). */
+function sampleInRange(): { a: number; op: Op; b: number; answer: number } {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const a = Math.floor(Math.random() * (MAX_OPERAND + 1));
+    const b = Math.floor(Math.random() * (MAX_OPERAND + 1));
+    const op = OPS[Math.floor(Math.random() * OPS.length)]!;
+    const answer = computeAnswer(a, op, b);
+    if (answer < NUM_CLASSES) return { a, op, b, answer };
+  }
+  // Fallback that always fits: addition of small values.
+  const a = Math.floor(Math.random() * 50);
+  const b = Math.floor(Math.random() * 50);
+  return { a, op: "+", b, answer: a + b };
+}
+
+/** Synthetic arithmetic dataset for pre-training (answer classification). */
 export class ArithmeticDataset implements Dataset {
-  readonly name = "synthetic-arithmetic";
+  readonly name = "synthetic-arithmetic-2digit";
 
   size(): number {
+    // Approximate: most (a,op,b) fit; mul with huge products is resampled away.
     return (MAX_OPERAND + 1) ** 2 * OPS.length;
   }
 
@@ -89,13 +127,10 @@ export class ArithmeticDataset implements Dataset {
     const texts: string[] = [];
 
     for (let i = 0; i < batchSize; i++) {
-      const a = Math.floor(Math.random() * (MAX_OPERAND + 1));
-      const b = Math.floor(Math.random() * (MAX_OPERAND + 1));
-      const op = OPS[Math.floor(Math.random() * OPS.length)];
-      const answer = Math.min(NUM_CLASSES - 1, computeAnswer(a, op, b));
+      const { a, op, b, answer } = sampleInRange();
       inputs.set(encodeFeatures(a, op, b), i * INPUT_DIM);
       targets[i] = answer;
-      texts.push(formatExpr(a, op, b, answer));
+      texts.push(describeExample(a, op, b, answer));
     }
 
     return {
