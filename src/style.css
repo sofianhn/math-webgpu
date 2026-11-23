@@ -56,6 +56,34 @@ h2 {
   line-height: 1.45;
 }
 
+.blog-link {
+  display: inline-block;
+  margin-top: 0.45rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.progress {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.progress-track {
+  height: 0.45rem;
+  background: #f0ebe1;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.12s linear;
+}
+
 .hint {
   grid-column: 1 / -1;
   margin: 0;
