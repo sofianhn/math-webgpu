@@ -2,21 +2,26 @@ import { WebGpuBackend } from "./webgpu";
 import { DEFAULT_HIDDEN, TinyMathMlp } from "./model";
 import {
   CURRICULUM,
+  INPUT_DIM,
   MAX_OPERAND,
   MathDataPipeline,
+  NUM_CLASSES,
   OPS,
   computeAnswer,
   encodeFeatures,
   formatExpr,
   inDomain,
+  isThreeDigitOrBeyond,
   type Op,
 } from "./data";
 import { MathTrainer } from "./trainer";
 import type { TrainMetrics } from "./types";
-import { renderCurves, renderNormBars, renderTopK } from "./viz";
+import { renderCurves, renderDataFeed, renderNormBars, renderTopK } from "./viz";
 
 const statusEl = document.querySelector("#status")!;
 const controlsEl = document.querySelector<HTMLElement>("#controls")!;
+const dataEl = document.querySelector<HTMLElement>("#data")!;
+const dataFeedEl = document.querySelector<HTMLElement>("#data-feed")!;
 const internalsEl = document.querySelector<HTMLElement>("#internals")!;
 const logEl = document.querySelector("#log")!;
 const probeEl = document.querySelector<HTMLElement>("#probe")!;
@@ -44,9 +49,9 @@ function paint(): Promise<void> {
 }
 
 const PRESETS: Record<string, { epochs: number; batch: number; lr: number; hidden: number }> = {
-  careful: { epochs: 80, batch: 32, lr: 0.001, hidden: 96 },
-  default: { epochs: 40, batch: 64, lr: 0.01, hidden: 96 },
-  spicy: { epochs: 25, batch: 64, lr: 0.08, hidden: 64 },
+  careful: { epochs: 100, batch: 32, lr: 0.001, hidden: 128 },
+  default: { epochs: 60, batch: 64, lr: 0.01, hidden: 96 },
+  spicy: { epochs: 35, batch: 64, lr: 0.08, hidden: 64 },
 };
 
 function log(line: string) {
@@ -58,6 +63,7 @@ async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total:
   let ok = 0;
   for (const [a, op, b] of CURRICULUM) {
     const truth = computeAnswer(a, op, b);
+    if (truth >= NUM_CLASSES) continue;
     const { answer } = await model.predict(encodeFeatures(a, op, b));
     if (answer === truth) ok++;
   }
@@ -79,8 +85,9 @@ function applyPreset(name: string) {
 async function boot() {
   try {
     const gpu = await WebGpuBackend.create();
-    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Forward matmuls use the compute shader (with CPU fallback if the driver disagrees).</p>`;
+    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Domain = operands <strong>0–${MAX_OPERAND}</strong> (two digits). Forward matmuls use the compute shader (CPU fallback if the driver disagrees).</p>`;
     controlsEl.hidden = false;
+    dataEl.hidden = false;
     internalsEl.hidden = false;
     probeEl.hidden = false;
     renderCurves(curvesEl, []);
@@ -89,6 +96,14 @@ async function boot() {
     const trainer = new MathTrainer();
     const pipeline = new MathDataPipeline("pretrain");
     let history: TrainMetrics[] = [];
+
+    // Show a sample of the data distribution before training.
+    const preview = pipeline.nextBatch(8);
+    renderDataFeed(
+      dataFeedEl,
+      preview.texts ?? [],
+      `Preview of random training rows (place-value features → answer class 0–${NUM_CLASSES - 1}):`,
+    );
 
     const smoke = await gpu.matmul(
       new Float32Array([1, 2, 3, 4]),
@@ -99,6 +114,9 @@ async function boot() {
     );
     const expected = [19, 22, 43, 50];
     const ok2 = expected.every((v, i) => Math.abs(smoke[i] - v) < 1e-3);
+    const A = Float32Array.from({ length: 32 * INPUT_DIM }, (_, i) => ((i * 17) % 100) / 50 - 1);
+    const W = Float32Array.from({ length: INPUT_DIM * 96 }, (_, i) => ((i * 13) % 100) / 100 - 0.5);
+    await gpu.matmul(A, W, 32, INPUT_DIM, 96);
     log(ok2 ? "GPU matmul smoke-test passed (2×2)." : `GPU matmul mismatch: ${Array.from(smoke)}`);
 
     document.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((btn) => {
@@ -124,9 +142,9 @@ async function boot() {
       progressEl.textContent = `Starting… 0 / ${epochs} epochs`;
       const fb0 = gpu.cpuFallbackCount;
       log(
-        `Pretrain start — epochs=${epochs} batch=${batchSize} lr=${learningRate} hidden=${hidden} · domain digits 0–${MAX_OPERAND}`,
+        `Pretrain start — epochs=${epochs} batch=${batchSize} lr=${learningRate} hidden=${hidden} · operands 0–${MAX_OPERAND} · ${INPUT_DIM}-D place-value features · ${NUM_CLASSES} answer classes`,
       );
-      log(`Why more epochs won’t fix 3+50: 50 was never encoded in training.`);
+      log(`OOD note: 100+ (three digits) is outside the encoder — more epochs cannot invent a hundreds place.`);
       await paint();
 
       await trainer.train(model, pipeline, {
@@ -139,14 +157,21 @@ async function boot() {
           const pctDone = (m.epoch / epochs) * 100;
           progressFill.style.width = `${pctDone.toFixed(1)}%`;
           progressEl.textContent = `Epoch ${m.epoch} / ${epochs} · loss ${m.loss.toFixed(4)} · acc ${(m.accuracy * 100).toFixed(1)}%`;
-          // Log every epoch so the scrollable log keeps pace with the curves.
           log(
             `epoch ${m.epoch.toString().padStart(3)}  loss=${m.loss.toFixed(4)}  acc=${(m.accuracy * 100).toFixed(1)}%`,
           );
           renderCurves(curvesEl, history, {
             title: `lr=${learningRate} · batch=${batchSize} · hidden=${hidden}`,
           });
-          // Mid-train smartness peek every ~20% so “follow along” includes probes.
+
+          // Refresh the data feed with a fresh batch so you see what “training data” looks like.
+          const live = pipeline.nextBatch(6);
+          renderDataFeed(
+            dataFeedEl,
+            live.texts ?? [],
+            `Live sample @ epoch ${m.epoch} (same distribution the optimizer just used):`,
+          );
+
           if (m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 5)) === 0) {
             const score = await curriculumScore(model);
             smartnessEl.textContent = `Smartness @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
@@ -195,10 +220,12 @@ async function boot() {
 
       if (!inDomain(a, b)) {
         oodEl.hidden = false;
+        const offender = isThreeDigitOrBeyond(a) ? a : b;
         oodEl.textContent =
-          `${formatExpr(a, op, b)} is outside the trained domain (digits 0–${MAX_OPERAND} only). ` +
-          `One-hot features for out-of-range digits stay empty, so the model is guessing. ` +
-          `More epochs will not help — it never saw digit ${a > MAX_OPERAND ? a : b} during training.`;
+          `${formatExpr(a, op, b)} is outside the trained domain (operands 0–${MAX_OPERAND}, two digits). ` +
+          `${offender} needs three or more digits — there is no hundreds place in the feature encoder. ` +
+          `More epochs will not help; the model never saw numbers ≥100. ` +
+          `Intrinsic arithmetic (generalizing past memorized place values) needs a different representation or algorithm — see the blog.`;
         predictionEl.textContent = "";
         topkEl.innerHTML = "";
         return;
@@ -206,6 +233,13 @@ async function boot() {
 
       oodEl.hidden = true;
       const truth = computeAnswer(a, op, b);
+      if (truth >= NUM_CLASSES) {
+        oodEl.hidden = false;
+        oodEl.textContent = `Truth ${truth} exceeds the ${NUM_CLASSES} answer classes this demo classifies. Try smaller factors.`;
+        predictionEl.textContent = "";
+        topkEl.innerHTML = "";
+        return;
+      }
       const { answer, probs } = await model.predict(encodeFeatures(a, op, b));
       predictionEl.textContent = `${formatExpr(a, op, b)} → model says ${answer} (truth ${truth})${
         answer === truth ? " ✓" : " ✗"
@@ -214,12 +248,8 @@ async function boot() {
     };
 
     predictBtn.addEventListener("click", () => void runPredict());
-    aInput.addEventListener("change", () => {
-      if (Number(aInput.value) > MAX_OPERAND || Number(aInput.value) < 0) void runPredict();
-    });
-    bInput.addEventListener("change", () => {
-      if (Number(bInput.value) > MAX_OPERAND || Number(bInput.value) < 0) void runPredict();
-    });
+    aInput.addEventListener("change", () => void runPredict());
+    bInput.addEventListener("change", () => void runPredict());
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     statusEl.innerHTML = `<p><strong>WebGPU failed.</strong> ${message}</p>`;
