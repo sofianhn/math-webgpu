@@ -1,5 +1,12 @@
 import type { TrainMetrics } from "./types";
 
+const PARAM_BLURB: Record<string, string> = {
+  W1: "weights from input features → hidden units",
+  b1: "bias added to each hidden unit",
+  W2: "weights from hidden units → answer classes",
+  b2: "bias added to each answer class",
+};
+
 /** SVG dual-axis loss + accuracy curve (educational training internals). */
 export function renderCurves(
   svg: SVGSVGElement,
@@ -48,29 +55,51 @@ export function renderCurves(
   `;
 }
 
-/** Horizontal bars for parameter L2 norms (before vs after train). */
+/**
+ * Parameter tables: count of numbers stored + how much their “size” (L2) moved.
+ * Educational: these are not hyperparameters (lr/epochs) — they are the model’s memory.
+ */
 export function renderNormBars(
   el: HTMLElement,
-  before: { name: string; l2: number }[],
-  after: { name: string; l2: number }[],
+  before: { name: string; l2: number; count: number }[],
+  after: { name: string; l2: number; count: number }[],
 ): void {
   const max = Math.max(...before.map((b) => b.l2), ...after.map((a) => a.l2), 1e-6);
-  el.innerHTML = before
-    .map((b, i) => {
-      const a = after[i]!;
-      const bw = (b.l2 / max) * 100;
-      const aw = (a.l2 / max) * 100;
-      const delta = a.l2 - b.l2;
-      return `<div class="norm-row">
-        <span class="norm-name">${b.name}</span>
+  const total = after.reduce((s, a) => s + a.count, 0);
+  el.innerHTML =
+    `<p class="norm-intro">The network stores <strong>${total.toLocaleString()}</strong> learnable numbers in four tables. Bars = table “size” (L2 norm) before → after training; Δ shows how much that table moved.</p>` +
+    before
+      .map((b, i) => {
+        const a = after[i]!;
+        const bw = (b.l2 / max) * 100;
+        const aw = (a.l2 / max) * 100;
+        const delta = a.l2 - b.l2;
+        const blurb = PARAM_BLURB[b.name] ?? "";
+        return `<div class="norm-row">
+        <div class="norm-meta">
+          <span class="norm-name">${b.name}</span>
+          <span class="norm-count">${a.count.toLocaleString()} numbers</span>
+          <span class="norm-blurb">${blurb}</span>
+        </div>
         <div class="norm-tracks">
-          <div class="norm-bar before" style="width:${bw.toFixed(1)}%" title="before ${b.l2.toFixed(3)}"></div>
-          <div class="norm-bar after" style="width:${aw.toFixed(1)}%" title="after ${a.l2.toFixed(3)}"></div>
+          <div class="norm-bar before" style="width:${bw.toFixed(1)}%" title="before L2 ${b.l2.toFixed(3)}"></div>
+          <div class="norm-bar after" style="width:${aw.toFixed(1)}%" title="after L2 ${a.l2.toFixed(3)}"></div>
         </div>
         <span class="norm-delta">${delta >= 0 ? "+" : ""}${delta.toFixed(2)}</span>
       </div>`;
-    })
-    .join("");
+      })
+      .join("");
+}
+
+/** Live strip of training expressions the model just saw. */
+export function renderDataFeed(el: HTMLElement, texts: string[], headline: string): void {
+  el.innerHTML =
+    `<p class="data-headline">${headline}</p>` +
+    `<ul class="data-list">${texts.map((t) => `<li><code>${escapeHtml(t)}</code></li>`).join("")}</ul>`;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** Top-k class probabilities as a compact list. */
