@@ -29,12 +29,19 @@ const curvesEl = document.querySelector<SVGSVGElement>("#curves")!;
 const normsEl = document.querySelector<HTMLElement>("#norms")!;
 const topkEl = document.querySelector<HTMLElement>("#topk")!;
 const smartnessEl = document.querySelector("#smartness")!;
+const progressEl = document.querySelector("#progress")!;
+const progressFill = document.querySelector<HTMLElement>("#progress-fill")!;
 const epochsInput = document.querySelector<HTMLInputElement>("#epochs")!;
 const batchInput = document.querySelector<HTMLInputElement>("#batch")!;
 const lrInput = document.querySelector<HTMLInputElement>("#lr")!;
 const hiddenInput = document.querySelector<HTMLInputElement>("#hidden")!;
 const aInput = document.querySelector<HTMLInputElement>("#a")!;
 const bInput = document.querySelector<HTMLInputElement>("#b")!;
+
+/** Yield so the browser can paint curves/log between epochs. */
+function paint(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+}
 
 const PRESETS: Record<string, { epochs: number; batch: number; lr: number; hidden: number }> = {
   careful: { epochs: 80, batch: 32, lr: 0.001, hidden: 96 },
@@ -113,27 +120,41 @@ async function boot() {
       const beforeNorms = model.weightNorms();
       history = [];
       renderCurves(curvesEl, history);
+      progressFill.style.width = "0%";
+      progressEl.textContent = `Starting… 0 / ${epochs} epochs`;
       const fb0 = gpu.cpuFallbackCount;
       log(
         `Pretrain start — epochs=${epochs} batch=${batchSize} lr=${learningRate} hidden=${hidden} · domain digits 0–${MAX_OPERAND}`,
       );
       log(`Why more epochs won’t fix 3+50: 50 was never encoded in training.`);
+      await paint();
 
       await trainer.train(model, pipeline, {
         stage: "pretrain",
         epochs,
         batchSize,
         learningRate,
-        onMetrics: (m) => {
+        onMetrics: async (m) => {
           history.push(m);
-          if (m.epoch === 1 || m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 10)) === 0) {
-            log(
-              `epoch ${m.epoch.toString().padStart(3)}  loss=${m.loss.toFixed(4)}  acc=${(m.accuracy * 100).toFixed(1)}%`,
-            );
-          }
+          const pctDone = (m.epoch / epochs) * 100;
+          progressFill.style.width = `${pctDone.toFixed(1)}%`;
+          progressEl.textContent = `Epoch ${m.epoch} / ${epochs} · loss ${m.loss.toFixed(4)} · acc ${(m.accuracy * 100).toFixed(1)}%`;
+          // Log every epoch so the scrollable log keeps pace with the curves.
+          log(
+            `epoch ${m.epoch.toString().padStart(3)}  loss=${m.loss.toFixed(4)}  acc=${(m.accuracy * 100).toFixed(1)}%`,
+          );
           renderCurves(curvesEl, history, {
             title: `lr=${learningRate} · batch=${batchSize} · hidden=${hidden}`,
           });
+          // Mid-train smartness peek every ~20% so “follow along” includes probes.
+          if (m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 5)) === 0) {
+            const score = await curriculumScore(model);
+            smartnessEl.textContent = `Smartness @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
+              (score.ok / score.total) *
+              100
+            ).toFixed(0)}%)`;
+          }
+          await paint();
         },
       });
 
@@ -143,6 +164,8 @@ async function boot() {
       const score = await curriculumScore(model);
       const pct = ((score.ok / score.total) * 100).toFixed(0);
       smartnessEl.textContent = `Smartness (curriculum ${score.ok}/${score.total}): ${pct}% — try another preset and retrain to see how knobs change this.`;
+      progressEl.textContent = `Done · ${epochs} epochs · final loss ${history.at(-1)?.loss.toFixed(4) ?? "—"}`;
+      progressFill.style.width = "100%";
 
       const fb = gpu.cpuFallbackCount - fb0;
       log(`Pretrain finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
