@@ -43,8 +43,10 @@ The bars labeled **W1 / b1 / W2 / b2** are the **model parameters** — the actu
 | --- | --- | --- |
 | **W1** | 44 × 96 | connections from features → hidden units |
 | **b1** | 96 | bias per hidden unit |
-| **W2** | 96 × 1000 | connections from hidden → answer classes |
-| **b2** | 1000 | bias per answer class |
+| **Wh / Wt / Wo** | 96 × 10 each | hundreds / tens / ones digit heads |
+| **bh / bt / bo** | 10 each | digit biases |
+
+(Older builds used a flat **W2** 96×1000 class head — easier to memorize, harder to generalize.)
 
 The bar length is the table’s **L2 norm** (overall magnitude) before → after a train run. Δ tells you how hard that table got shoved. Count tells you how many knobs live in that table. Together they are the network’s **memory**, not the training schedule.
 
@@ -77,20 +79,23 @@ A useful classroom test: hold out all expressions that contain digit `7` in the 
 | Epochs | Train longer | More passes over 0–99; useless for ≥100 |
 | Hidden units | Capacity | Wider layers fit more of the table faster |
 
-## Making it “smarter” in this demo
+## Making it learn math (not just memorize)
 
-Use the UI presets:
+Two changes matter more than “make H bigger”:
 
-- **Model size** (Tiny→XL or custom hidden units): more parameters → more capacity. Watch the parameter count line.
-- **Dataset scale**: examples/epoch map to **tokens/epoch** (5 tokens per expression). Thin vs Rich changes how much signal each epoch sees.
-- **Held-out eval**: ones-digit **7** never appears in training batches. Each epoch reports held-out **accuracy** and **perplexity** (`exp(cross-entropy)`). If train perplexity crashes but held-out stays high, you memorized.
-- Probe `17 + 2` after a high train-acc run — that pattern was held out.
+1. **Digit-wise answer head** — the net predicts hundreds / tens / ones of the answer and composes `100·H + 10·T + O`, instead of a flat softmax over 1000 class IDs. That forces place-value structure in the *output*.
+2. **Fair expression holdout** — freeze ~10% of exact `(a, op, b)` triples for eval, but keep **every digit 0–9** in other training rows. (Holding out all ones-digit **7**s was a harsh classroom probe: that input feature never fired, so 0% hold accuracy was almost guaranteed.)
+
+Also still useful:
+
+- **Model size** / **dataset scale** / **LR presets** — capacity and signal per epoch.
+- Watch **train vs held-out** accuracy. If both rise, digits are generalizing. If only train rises, you’re still overfitting combinations.
 
 ## What to try on the live page
 
-1. Read the **data feed** before and during Train; skim the held-out bank.
-2. Train Medium + Default data; compare train vs held-out perplexity on the chart.
-3. Bump to **Large** / **Rich** and see whether held-out improves or only train does.
-4. Try `12 + 34` (train-dist) vs `17 + 2` (held-out) vs `100 + 3` (OOD).
+1. Train Medium + Default with fair held-out on; watch hold accuracy climb (not explode in perplexity alone).
+2. Probe a train-dist sum and a frozen held-out expression from the bank.
+3. Try `100 + 3` (OOD) — digit heads still can’t invent a hundreds *input* place.
+4. Compare parameter tables: you should see **Wh / Wt / Wo**, not a giant W2.
 
 **A model only learns the world you can represent — and only the objective you optimize.**

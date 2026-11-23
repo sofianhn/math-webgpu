@@ -11,9 +11,9 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Make the demo smarter with <strong>size presets</strong>, a tunable
-        <strong>dataset (examples → tokens)</strong>, and
-        <strong>held-out + perplexity evals</strong> the optimizer never trains on.
+        Teach a browser MLP to <strong>compose digit answers</strong> (hundreds / tens / ones),
+        not just memorize a 1000-way table — with a <strong>fair held-out</strong> of frozen
+        expressions (all digits still appear in training).
         <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
@@ -23,9 +23,10 @@
 
       <section id="controls" hidden>
         <p class="hint">
-          Domain = operands <strong>0–99</strong>. Held-out evals exclude ones-digit
-          <strong>7</strong> from training so you can see memorization vs generalization.
-          Perplexity = <code>exp(cross-entropy)</code> on answer classes.
+          Domain = operands <strong>0–99</strong>. The model predicts answer
+          <strong>digits</strong> then composes them. Fair held-out freezes ~10% of exact
+          expressions — every digit <strong>0–9</strong> still shows up in other training rows.
+          Perplexity = <code>exp(cross-entropy)</code>.
         </p>
 
         <h3 class="subhead">Model size (parameter count)</h3>
@@ -80,7 +81,7 @@
         </label>
         <label class="check">
           <input id="heldout" type="checkbox" checked />
-          Held-out eval each epoch (ones-digit 7 never in train)
+          Fair held-out each epoch (~10% frozen expressions; all digits stay in train)
         </label>
         <button id="train" type="button">Train (pretrain)</button>
         <button id="eval" type="button" disabled>Evaluate train-dist</button>
@@ -89,8 +90,8 @@
       <section id="data" hidden>
         <h2>What data is it training on?</h2>
         <p class="hint">
-          Train rows avoid held-out digit patterns when the checkbox is on. The held-out
-          panel shows expressions the optimizer <em>never</em> saw.
+          Train rows skip the frozen expression bank when held-out is on — but still use
+          every ones/tens digit. The panel lists expressions the optimizer never saw.
         </p>
         <div id="data-feed" class="data-feed" aria-live="polite">
           <p class="data-headline">Hit Train to stream live batch examples here.</p>
@@ -111,7 +112,7 @@
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
         <p class="hint">
           Count = how many numbers in that table. Bars = magnitude before → after.
-          Bigger size presets → more parameters → more capacity to fit (and overfit).
+          Heads are <strong>Wh / Wt / Wo</strong> (hundreds / tens / ones), not a giant W2.
         </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>
@@ -120,9 +121,9 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          In-domain: <strong>0–99</strong>. Try a held-out pattern like
-          <code>17 + 2</code> (ones-digit 7) after training — if train acc is high but
-          this fails, you mostly memorized.
+          In-domain: <strong>0–99</strong>. After training, try a train-dist sum and a
+          held-out expression from the bank. Digit heads should generalize better than a
+          flat 1000-way classifier — still not a true calculator.
         </p>
         <div class="row">
           <input id="a" type="number" min="0" max="999" value="12" />
@@ -137,7 +138,7 @@
         </div>
         <p id="ood" class="ood" hidden></p>
         <p id="prediction"></p>
-        <h3 class="subhead">Top answer-class probabilities</h3>
+        <h3 class="subhead">Top answer probabilities (composed digits)</h3>
         <div id="topk" class="topk"></div>
       </section>
     </main>

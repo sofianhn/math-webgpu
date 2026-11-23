@@ -3,9 +3,22 @@ import type { TrainMetrics } from "./types";
 const PARAM_BLURB: Record<string, string> = {
   W1: "weights from input features → hidden units",
   b1: "bias added to each hidden unit",
-  W2: "weights from hidden units → answer classes",
-  b2: "bias added to each answer class",
+  Wh: "hidden → hundreds digit (0–9)",
+  bh: "bias for hundreds digit",
+  Wt: "hidden → tens digit (0–9)",
+  bt: "bias for tens digit",
+  Wo: "hidden → ones digit (0–9)",
+  bo: "bias for ones digit",
+  W2: "legacy flat answer head (unused)",
+  b2: "legacy flat answer bias (unused)",
 };
+
+function formatPpl(p: number): string {
+  if (!Number.isFinite(p)) return "∞";
+  if (p >= 1e6) return p.toExponential(2);
+  if (p >= 1000) return p.toFixed(0);
+  return p.toFixed(1);
+}
 
 /** SVG dual-axis loss + accuracy curve (educational training internals). */
 export function renderCurves(
@@ -49,11 +62,11 @@ export function renderCurves(
 
   const last = history[history.length - 1]!;
   const holdBit = last.heldout
-    ? ` · hold ppl ${last.heldout.perplexity.toFixed(1)} acc ${(last.heldout.accuracy * 100).toFixed(0)}%`
+    ? ` · hold ppl ${formatPpl(last.heldout.perplexity)} acc ${(last.heldout.accuracy * 100).toFixed(0)}%`
     : "";
   svg.innerHTML = `
     <text x="${pad.l}" y="16" fill="#1a1a18" font-size="12" font-weight="600">${opts?.title ?? "Training curves"}</text>
-    <text x="${W - pad.r}" y="16" text-anchor="end" fill="#5c5a52" font-size="10">ep ${last.epoch} · ppl ${last.perplexity.toFixed(1)} · acc ${(last.accuracy * 100).toFixed(0)}%${holdBit}</text>
+    <text x="${W - pad.r}" y="16" text-anchor="end" fill="#5c5a52" font-size="10">ep ${last.epoch} · ppl ${formatPpl(last.perplexity)} · acc ${(last.accuracy * 100).toFixed(0)}%${holdBit}</text>
     <line x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${pad.t + ih}" stroke="#d9d2c3"/>
     <line x1="${pad.l}" y1="${pad.t + ih}" x2="${pad.l + iw}" y2="${pad.t + ih}" stroke="#d9d2c3"/>
     <path d="${lossPath}" fill="none" stroke="#0b6e4f" stroke-width="2"/>
