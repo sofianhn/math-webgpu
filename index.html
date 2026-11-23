@@ -11,9 +11,10 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Train a tiny MLP on digit arithmetic (0–9) in your browser. Tweak epochs,
-        batch size, and learning rate — watch loss, accuracy, and weight norms
-        move — then probe what it actually learned.
+        Train a tiny MLP on <strong>two-digit</strong> arithmetic (operands
+        <strong>0–99</strong>) in your browser. Charts show learning; the data
+        feed shows exactly what it saw; parameter tables show how many numbers
+        the model stores.
         <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
@@ -23,8 +24,10 @@
 
       <section id="controls" hidden>
         <p class="hint">
-          Hyperparameters change <em>how</em> it learns, not <em>what domain</em>
-          it knows. The curriculum is only operands <strong>0–9</strong>.
+          Knobs below change <em>how fast / how stably</em> it fits the training
+          distribution — not the domain itself. Domain = integers
+          <strong>0–99</strong>. Values <strong>≥&nbsp;100</strong> (three digits)
+          are out of distribution.
         </p>
         <div class="presets" role="group" aria-label="Learning presets">
           <button type="button" data-preset="careful" class="preset">Careful · lr 0.001</button>
@@ -33,7 +36,7 @@
         </div>
         <label>
           Epochs
-          <input id="epochs" type="number" min="1" max="300" value="40" />
+          <input id="epochs" type="number" min="1" max="300" value="60" />
         </label>
         <label>
           Batch size
@@ -51,13 +54,32 @@
         <button id="eval" type="button" disabled>Evaluate</button>
       </section>
 
+      <section id="data" hidden>
+        <h2>What data is it training on?</h2>
+        <p class="hint">
+          Each example is a random expression with operands in <strong>0–99</strong>
+          and op in {+, −, ×, ÷}. Features are <em>place-value</em> one-hots
+          (tens digit + ones digit for each operand), not a single flat ID per number.
+          Answers are classification classes <strong>0–999</strong> (huge products are
+          resampled so they fit).
+        </p>
+        <div id="data-feed" class="data-feed" aria-live="polite">
+          <p class="data-headline">Hit Train to stream live batch examples here.</p>
+        </div>
+      </section>
+
       <section id="internals" hidden>
         <h2>Training internals</h2>
         <p id="progress" class="progress" aria-live="polite">Idle — hit Train to follow loss &amp; accuracy live.</p>
         <div class="progress-track" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
         <p id="smartness" class="smartness" aria-live="polite">Smartness: not trained yet</p>
         <svg id="curves" class="curves" xmlns="http://www.w3.org/2000/svg"></svg>
-        <h3 class="subhead">Weight L2 norms (before → after)</h3>
+        <h3 class="subhead">Parameter tables (the model’s memory)</h3>
+        <p class="hint">
+          These are not the knobs above. They are the actual arrays of numbers the
+          network adjusts. Count = how many numbers in that table. Bars = overall
+          magnitude before → after one train run.
+        </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>
       </section>
@@ -65,23 +87,25 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          Digits outside <strong>0–9</strong> were never in the training set.
-          Extra epochs will not invent them — that is out-of-distribution (OOD).
+          In-domain: <strong>0–99</strong> (up to two digits). Try
+          <code>12 + 34</code>. For <strong>100+</strong> (three digits), you’ll get
+          an OOD message — more epochs will not invent a hundreds place the encoder
+          never had.
         </p>
         <div class="row">
-          <input id="a" type="number" min="0" max="9" value="3" />
+          <input id="a" type="number" min="0" max="999" value="12" />
           <select id="op">
             <option value="+">+</option>
             <option value="-">−</option>
             <option value="*">×</option>
             <option value="/">÷</option>
           </select>
-          <input id="b" type="number" min="0" max="9" value="5" />
+          <input id="b" type="number" min="0" max="999" value="34" />
           <button id="predict" type="button">Predict</button>
         </div>
         <p id="ood" class="ood" hidden></p>
         <p id="prediction"></p>
-        <h3 class="subhead">Top class probabilities</h3>
+        <h3 class="subhead">Top answer-class probabilities</h3>
         <div id="topk" class="topk"></div>
       </section>
     </main>
