@@ -14,6 +14,7 @@
         Train a tiny MLP on digit arithmetic (0–9) in your browser. Tweak epochs,
         batch size, and learning rate — watch loss, accuracy, and weight norms
         move — then probe what it actually learned.
+        <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
       <section id="status" aria-live="polite">
@@ -52,6 +53,8 @@
 
       <section id="internals" hidden>
         <h2>Training internals</h2>
+        <p id="progress" class="progress" aria-live="polite">Idle — hit Train to follow loss &amp; accuracy live.</p>
+        <div class="progress-track" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
         <p id="smartness" class="smartness" aria-live="polite">Smartness: not trained yet</p>
         <svg id="curves" class="curves" xmlns="http://www.w3.org/2000/svg"></svg>
         <h3 class="subhead">Weight L2 norms (before → after)</h3>
