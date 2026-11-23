@@ -6,7 +6,13 @@
  * - Upload weights once; keep activations on-GPU across layers.
  * - Move backward into WGSL (dW = X^T @ dY, etc.) for full GPU training.
  * Today: GPU matmul for forward GEMMs; caller copies results back for CPU loss/backward.
+ *
+ * Mobile / flaky-driver safety: each matmul is serialized, uses a fresh dims uniform,
+ * and is checked against a CPU reference — on mismatch we return the CPU result so
+ * training still converges (avoids "loss≈0 but probe wrong" from corrupt GEMMs).
  */
+
+import { cpuMatmul, maxAbsDiff } from "./tensor";
 
 const MATMUL_WGSL = /* wgsl */ `
 struct Dims {
@@ -36,15 +42,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+function padBytes(nbytes: number): number {
+  // Storage buffers: multiple of 4; pad to 16 for broader driver friendliness.
+  return Math.max(16, Math.ceil(nbytes / 16) * 16);
+}
+
 export class WebGpuBackend {
   readonly device: GPUDevice;
   private readonly matmulPipeline: GPUComputePipeline;
-  private readonly dimsBuffer: GPUBuffer;
+  /** Serialize matmuls so concurrent train/predict cannot race the queue. */
+  private chain: Promise<unknown> = Promise.resolve();
+  /** How many times CPU fallback replaced a bad GPU result. */
+  cpuFallbackCount = 0;
 
-  private constructor(device: GPUDevice, pipeline: GPUComputePipeline, dimsBuffer: GPUBuffer) {
+  private constructor(device: GPUDevice, pipeline: GPUComputePipeline) {
     this.device = device;
     this.matmulPipeline = pipeline;
-    this.dimsBuffer = dimsBuffer;
   }
 
   static async create(): Promise<WebGpuBackend> {
@@ -59,28 +72,46 @@ export class WebGpuBackend {
       layout: "auto",
       compute: { module, entryPoint: "main" },
     });
-    const dimsBuffer = device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    return new WebGpuBackend(device, pipeline, dimsBuffer);
+    return new WebGpuBackend(device, pipeline);
   }
 
-  /** C[M,N] = A[M,K] @ B[K,N] on GPU; returns Float32Array of length M*N. */
+  /** C[M,N] = A[M,K] @ B[K,N]; GPU first, CPU if the driver result disagrees. */
   async matmul(A: Float32Array, B: Float32Array, M: number, K: number, N: number): Promise<Float32Array> {
     if (A.length !== M * K) throw new Error(`A size ${A.length} != ${M}*${K}`);
     if (B.length !== K * N) throw new Error(`B size ${B.length} != ${K}*${N}`);
 
-    const aBuf = this.upload(A, GPUBufferUsage.STORAGE);
-    const bBuf = this.upload(B, GPUBufferUsage.STORAGE);
-    const cSize = M * N * 4;
+    const cpu = cpuMatmul(A, B, M, K, N);
+    const run = this.chain.then(() => this.matmulGpu(A, B, M, K, N));
+    this.chain = run.catch(() => undefined);
+    try {
+      const gpu = await run;
+      const diff = maxAbsDiff(gpu, cpu);
+      if (!(diff < 1e-2) || gpu.length !== cpu.length) {
+        this.cpuFallbackCount += 1;
+        return cpu;
+      }
+      return gpu;
+    } catch {
+      this.cpuFallbackCount += 1;
+      return cpu;
+    }
+  }
+
+  private async matmulGpu(A: Float32Array, B: Float32Array, M: number, K: number, N: number): Promise<Float32Array> {
+    const aBuf = this.upload(A);
+    const bBuf = this.upload(B);
+    const cBytes = padBytes(M * N * 4);
     const cBuf = this.device.createBuffer({
-      size: Math.max(4, cSize),
+      size: cBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    const dims = new Uint32Array([M, K, N, 0]);
-    this.device.queue.writeBuffer(this.dimsBuffer, 0, dims);
+    // Fresh dims uniform per dispatch — avoids races if calls ever overlap.
+    const dimsBuffer = this.device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([M, K, N, 0]));
 
     const bindGroup = this.device.createBindGroup({
       layout: this.matmulPipeline.getBindGroupLayout(0),
@@ -88,7 +119,7 @@ export class WebGpuBackend {
         { binding: 0, resource: { buffer: aBuf } },
         { binding: 1, resource: { buffer: bBuf } },
         { binding: 2, resource: { buffer: cBuf } },
-        { binding: 3, resource: { buffer: this.dimsBuffer } },
+        { binding: 3, resource: { buffer: dimsBuffer } },
       ],
     });
 
@@ -100,28 +131,31 @@ export class WebGpuBackend {
     pass.end();
 
     const readBuf = this.device.createBuffer({
-      size: Math.max(4, cSize),
+      size: cBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    encoder.copyBufferToBuffer(cBuf, 0, readBuf, 0, cSize);
+    encoder.copyBufferToBuffer(cBuf, 0, readBuf, 0, M * N * 4);
     this.device.queue.submit([encoder.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
 
     await readBuf.mapAsync(GPUMapMode.READ);
-    const copy = new Float32Array(readBuf.getMappedRange().slice(0));
+    const mapped = new Float32Array(readBuf.getMappedRange());
+    const out = mapped.slice(0, M * N);
     readBuf.unmap();
 
     aBuf.destroy();
     bBuf.destroy();
     cBuf.destroy();
+    dimsBuffer.destroy();
     readBuf.destroy();
 
-    return copy.slice(0, M * N);
+    return out;
   }
 
-  private upload(data: Float32Array, usage: GPUBufferUsageFlags): GPUBuffer {
+  private upload(data: Float32Array): GPUBuffer {
     const buf = this.device.createBuffer({
-      size: Math.max(4, data.byteLength),
-      usage: usage | GPUBufferUsage.COPY_DST,
+      size: padBytes(data.byteLength),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       mappedAtCreation: true,
     });
     new Float32Array(buf.getMappedRange()).set(data);

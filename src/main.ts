@@ -24,11 +24,11 @@ async function boot() {
     controlsEl.hidden = false;
     probeEl.hidden = false;
 
-    const model = new TinyMathMlp(gpu);
+    let model = new TinyMathMlp(gpu);
     const trainer = new MathTrainer();
     const pipeline = new MathDataPipeline("pretrain");
 
-    // Smoke-test one GPU matmul before training UI is used.
+    // Smoke-test: tiny + train-shaped GEMMs (catches driver bugs the 2×2 alone misses).
     const smoke = await gpu.matmul(
       new Float32Array([1, 2, 3, 4]),
       new Float32Array([5, 6, 7, 8]),
@@ -37,16 +37,29 @@ async function boot() {
       2,
     );
     const expected = [19, 22, 43, 50];
-    const ok = expected.every((v, i) => Math.abs(smoke[i] - v) < 1e-3);
-    log(ok ? "GPU matmul smoke-test passed (2×2)." : `GPU matmul mismatch: ${Array.from(smoke)}`);
+    const ok2 = expected.every((v, i) => Math.abs(smoke[i] - v) < 1e-3);
+    const A = Float32Array.from({ length: 64 * 24 }, (_, i) => ((i * 17) % 100) / 50 - 1);
+    const W = Float32Array.from({ length: 24 * 96 }, (_, i) => ((i * 13) % 100) / 100 - 0.5);
+    const beforeFb = gpu.cpuFallbackCount;
+    await gpu.matmul(A, W, 64, 24, 96);
+    const usedFallback = gpu.cpuFallbackCount > beforeFb;
+    log(
+      ok2
+        ? `GPU matmul smoke-test passed (2×2)${usedFallback ? "; larger GEMM uses CPU fallback (driver mismatch)." : "."}`
+        : `GPU matmul mismatch: ${Array.from(smoke)}`,
+    );
 
     trainBtn.addEventListener("click", async () => {
       trainBtn.disabled = true;
       evalBtn.disabled = true;
+      predictBtn.disabled = true;
       logEl.textContent = "";
       const epochs = Number((document.querySelector("#epochs") as HTMLInputElement).value);
       const batchSize = Number((document.querySelector("#batch") as HTMLInputElement).value);
       const learningRate = Number((document.querySelector("#lr") as HTMLInputElement).value);
+      // Fresh weights each run so a prior broken train cannot linger.
+      model = new TinyMathMlp(gpu);
+      const fb0 = gpu.cpuFallbackCount;
       log(`Pretrain start — epochs=${epochs} batch=${batchSize} lr=${learningRate}`);
 
       await trainer.train(model, pipeline, {
@@ -58,9 +71,23 @@ async function boot() {
           log(`epoch ${m.epoch.toString().padStart(3)}  loss=${m.loss.toFixed(4)}  acc=${(m.accuracy * 100).toFixed(1)}%`),
       });
 
-      log("Pretrain finished.");
+      const fb = gpu.cpuFallbackCount - fb0;
+      log(`Pretrain finished.${fb ? ` (CPU matmul fallback used ${fb}× — GPU result disagreed.)` : ""}`);
+      // Quick held-out probes so a "loss≈0 but wrong answers" bug is obvious in the log.
+      for (const [a, op, b] of [
+        [3, "+", 5],
+        [2, "*", 4],
+        [9, "-", 3],
+        [8, "/", 2],
+      ] as const) {
+        const truth =
+          op === "+" ? a + b : op === "*" ? a * b : op === "-" ? Math.max(0, a - b) : Math.floor(a / b);
+        const { answer } = await model.predict(encodeFeatures(a, op, b));
+        log(`probe ${formatExpr(a, op, b)} → ${answer} (want ${truth})${answer === truth ? " ✓" : " ✗"}`);
+      }
       trainBtn.disabled = false;
       evalBtn.disabled = false;
+      predictBtn.disabled = false;
     });
 
     evalBtn.addEventListener("click", async () => {

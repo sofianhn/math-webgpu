@@ -35,6 +35,28 @@ export function addBiasInPlace(mat: Float32Array, rows: number, cols: number, bi
   }
 }
 
+/** Row-major C[M,N] = A[M,K] @ B[K,N] (CPU reference / fallback). */
+export function cpuMatmul(A: Float32Array, B: Float32Array, M: number, K: number, N: number): Float32Array {
+  if (A.length !== M * K) throw new Error(`A size ${A.length} != ${M}*${K}`);
+  if (B.length !== K * N) throw new Error(`B size ${B.length} != ${K}*${N}`);
+  const C = new Float32Array(M * N);
+  for (let i = 0; i < M; i++) {
+    for (let j = 0; j < N; j++) {
+      let s = 0;
+      for (let k = 0; k < K; k++) s += A[i * K + k] * B[k * N + j];
+      C[i * N + j] = s;
+    }
+  }
+  return C;
+}
+
+export function maxAbsDiff(a: Float32Array, b: Float32Array): number {
+  const n = Math.min(a.length, b.length);
+  let m = 0;
+  for (let i = 0; i < n; i++) m = Math.max(m, Math.abs(a[i] - b[i]));
+  return m;
+}
+
 export function reluInPlace(x: Float32Array): void {
   for (let i = 0; i < x.length; i++) if (x[i] < 0) x[i] = 0;
 }
