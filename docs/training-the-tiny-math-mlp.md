@@ -88,14 +88,17 @@ Two architecture changes matter more than “make H bigger”:
 
 ### Simple vs Ninja (the defaults that matter)
 
-Swept on CPU with fair held-out + fixed easy/hard probes (`scripts/sweep-*.ts`):
+Hardened after `47×19` landed as #2 in top-k (813 vs 893): **more epochs alone is weak** when the net is already close. Levers that mattered:
 
-| Mode | Hidden | Epochs | LR | Examples/epoch | Typical held-out | Hard probes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Simple** | 112 | 55 | 0.01 | 3072 | ~83% | ~50% |
-| **Ninja** (page default) | 256 | 150 | 0.005 | 10240 | ~90% | ~83% |
+1. **Data mix** — overweight `×` and carry-heavy `+`
+2. **Capacity** — two-layer trunk + H288
+3. **Objective** — digit CE with tens weighted 1.35 (tens was the miss)
+4. **Epochs** — only a modest bump (150→160) after mix/depth helped
 
-Ninja is slower (a few minutes on phones) and is meant to look *actually good* on carries and multiplies like `47+38`, `17×19`, `25×25`.
+| Mode | Hidden | Epochs | LR | Examples/epoch | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| **Simple** | 128 | 60 | 0.01 | 4096 | Faster, lighter mul mix |
+| **Ninja** (default) | 288 | 160 | 0.0045 | 12288 | `47×19` ✓ in `sweep-mul.ts` (~92% hard-mul pack) |
 
 ## What to try on the live page
 

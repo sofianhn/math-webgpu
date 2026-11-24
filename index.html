@@ -11,9 +11,9 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Hit <strong>Train</strong> with the default <strong>Ninja</strong> settings — tuned to
-        actually get strong at two-digit arithmetic (held-out ~90% in sweeps), including hard
-        carries and multiplies. Or switch to <strong>Simple</strong> for a faster pass.
+        Hit <strong>Train</strong> on default <strong>Ninja</strong> — mul/carry-weighted data and a
+        deeper trunk so hard products like <code>47 × 19</code> land, not just more epochs.
+        <strong>Simple</strong> is the faster pass.
         <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
@@ -25,11 +25,11 @@
         <h3 class="subhead">Mode</h3>
         <div class="presets mode-presets" role="group" aria-label="Training mode">
           <button type="button" data-mode="simple" class="preset">Simple · fast</button>
-          <button type="button" data-mode="ninja" class="preset is-active">Ninja · strong math</button>
+          <button type="button" data-mode="ninja" class="preset is-active">Ninja · hard muls</button>
         </div>
         <p id="mode-blurb" class="hint">
-          Ninja is the default — more hidden units, more examples/epoch, longer train. Empirically
-          chosen for hard mul/carry probes.
+          Ninja default — overweight × / carries, deeper trunk, tens-digit emphasis. More epochs
+          alone is weak when the truth is already #2 in top-k.
         </p>
 
         <label class="check">
@@ -47,11 +47,11 @@
           </p>
           <label>
             Hidden units
-            <input id="hidden" type="number" min="16" max="512" step="8" value="256" />
+            <input id="hidden" type="number" min="16" max="512" step="8" value="288" />
           </label>
           <label>
             Examples / epoch
-            <input id="examples" type="number" min="128" max="20000" step="64" value="10240" />
+            <input id="examples" type="number" min="128" max="20000" step="64" value="12288" />
           </label>
           <label>
             Batch size
@@ -59,11 +59,11 @@
           </label>
           <label>
             Epochs
-            <input id="epochs" type="number" min="1" max="300" value="150" />
+            <input id="epochs" type="number" min="1" max="300" value="160" />
           </label>
           <label>
             Learning rate
-            <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.005" />
+            <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.0045" />
           </label>
           <p id="param-count" class="hint param-count">Parameters: —</p>
           <p id="token-count" class="hint param-count">Tokens / epoch: —</p>
@@ -95,7 +95,8 @@
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
         <p class="hint">
           Count = how many numbers in that table. Bars = magnitude before → after.
-          Heads are <strong>Wh / Wt / Wo</strong> (hundreds / tens / ones).
+          Trunk is <strong>W1 → W2</strong> (two ReLU layers); heads are
+          <strong>Wh / Wt / Wo</strong> (hundreds / tens / ones).
         </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>
@@ -104,8 +105,8 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          After Ninja training, try hard probes like <code>47 + 38</code>, <code>17 × 19</code>,
-          <code>25 × 25</code>, and a frozen held-out expression from the bank.
+          After Ninja training, try <code>47 × 19</code> (the tough case), plus
+          <code>17 × 19</code>, <code>25 × 25</code>, and a held-out bank row.
         </p>
         <div class="row">
           <input id="a" type="number" min="0" max="999" value="47" />

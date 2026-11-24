@@ -1,16 +1,16 @@
 import type { TrainMetrics } from "./types";
 
 const PARAM_BLURB: Record<string, string> = {
-  W1: "weights from input features → hidden units",
-  b1: "bias added to each hidden unit",
+  W1: "input features → first hidden layer",
+  b1: "bias for first hidden layer",
+  W2: "first → second hidden layer (deeper trunk)",
+  b2: "bias for second hidden layer",
   Wh: "hidden → hundreds digit (0–9)",
   bh: "bias for hundreds digit",
   Wt: "hidden → tens digit (0–9)",
   bt: "bias for tens digit",
   Wo: "hidden → ones digit (0–9)",
   bo: "bias for ones digit",
-  W2: "legacy flat answer head (unused)",
-  b2: "legacy flat answer bias (unused)",
 };
 
 function formatPpl(p: number): string {

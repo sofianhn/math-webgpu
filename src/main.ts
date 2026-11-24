@@ -5,6 +5,7 @@ import {
   CURRICULUM,
   MAX_OPERAND,
   MathDataPipeline,
+  NINJA_MIX,
   OPS,
   TOKENS_PER_EXAMPLE,
   computeAnswer,
@@ -179,11 +180,14 @@ async function boot() {
     }
 
     const previewFilter = (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b);
-    const previewPipe = new MathDataPipeline("pretrain", new ArithmeticDataset(previewFilter));
+    const previewPipe = new MathDataPipeline(
+      "pretrain",
+      new ArithmeticDataset({ filter: previewFilter, mix: NINJA_MIX, hardBias: 0.45 }),
+    );
     renderDataFeed(
       dataFeedEl,
       previewPipe.nextBatch(6).texts ?? [],
-      "Preview of train-distribution rows (fair held-out excluded when eval is on):",
+      "Preview of train-distribution rows (Ninja mix favors × / carries; fair held-out excluded):",
     );
 
     trainBtn.addEventListener("click", async () => {
@@ -206,7 +210,16 @@ async function boot() {
       const trainFilter = useHeldout
         ? (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b)
         : undefined;
-      const pipeline = new MathDataPipeline("pretrain", new ArithmeticDataset(trainFilter));
+      // Ninja (and default page mode) overweight mul/carry; Simple stays lighter but still mul-aware.
+      const useNinjaMix = modeLabel === "ninja" || modeLabel === "custom";
+      const pipeline = new MathDataPipeline(
+        "pretrain",
+        new ArithmeticDataset({
+          filter: trainFilter,
+          mix: useNinjaMix ? NINJA_MIX : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
+          hardBias: useNinjaMix ? 0.5 : 0.25,
+        }),
+      );
       const heldoutBatch = useHeldout ? batchFromExprs(holdExprs) : undefined;
 
       model = new TinyMathMlp(gpu, hidden);
@@ -274,6 +287,7 @@ async function boot() {
         [12, "+", 34],
         [47, "+", 38],
         [17, "*", 19],
+        [47, "*", 19],
         [25, "*", 25],
         holdProbe ?? [58, "+", 67],
       ];
@@ -293,9 +307,11 @@ async function boot() {
       evalBtn.disabled = true;
       const pipeline = new MathDataPipeline(
         "pretrain",
-        new ArithmeticDataset(
-          heldoutInput.checked ? (a, b, op) => !isExpressionHeldOut(a, op, b) : undefined,
-        ),
+        new ArithmeticDataset({
+          filter: heldoutInput.checked ? (a, b, op) => !isExpressionHeldOut(a, op, b) : undefined,
+          mix: NINJA_MIX,
+          hardBias: 0.45,
+        }),
       );
       const { loss, accuracy, perplexity } = await trainer.evaluate(model, pipeline, 15);
       log(`eval train-dist  loss=${loss.toFixed(4)}  ppl=${formatPpl(perplexity)}  acc=${(accuracy * 100).toFixed(1)}%`);
