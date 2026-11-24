@@ -8,7 +8,7 @@ Architecture is staged for **pretrain → finetune → rl**. Only **pretrain** (
 
 **https://sofianhn.github.io/math-webgpu/**
 
-Digits **0–9** only. Expressions like `3 + 50` are out of distribution — more epochs will not help. See the training blog: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md).
+Two-digit operands **0–99**. Load pretrained **Simple / Mid / Ninja** checkpoints for instant curves + eval, or **Train New** from scratch. See the training blog: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md).
 
 ## Requirements
 
@@ -27,7 +27,11 @@ npm install
 npm run dev
 ```
 
-Open the URL Vite prints (default `http://localhost:5173`). Click **Train (pretrain)**, watch loss/accuracy, then **Evaluate** or try an expression.
+Open the URL Vite prints (default `http://localhost:5173`). A saved **Ninja** checkpoint loads by default — inspect curves, **Run Eval**, or **Train New**. Offline pretrain:
+
+```bash
+npm run pretrain:checkpoints
+```
 
 Clone:
 
@@ -41,22 +45,28 @@ cd math-webgpu
 
 ```
 math-webgpu/
-  index.html          Demo UI (presets, curves, OOD probe)
+  index.html          Demo UI (saved models, curves, OOD probe)
+  public/checkpoints/ Pretrained Simple / Mid / Ninja (+ curves)
   docs/training-the-tiny-math-mlp.md
+  scripts/pretrain-checkpoints.ts
   package.json
   tsconfig.json
   vite.config.ts
   README.md
   src/
-    main.ts           Boot WebGPU, wire train / eval / predict / viz
+    main.ts           Boot WebGPU, load checkpoints / train / eval / predict
+    checkpoint.ts     Weights + hyperparams + curve format
+    posttrain.ts      Stub: digit RL / DPO digits / self-consistency
     viz.ts            Loss/acc curves, weight norms, top-k probs
     style.css
+    presets.ts        Simple / Mid / Ninja hyperparams
     types.ts          Model / Dataset / Trainer / TrainingStage interfaces
     tensor.ts         CPU tensor helpers (softmax, CE, ReLU, matmul)
     webgpu.ts         navigator.gpu init + matmul compute shader
     data.ts           Synthetic arithmetic Dataset + DataPipeline
     model.ts          TinyMathMlp (GPU forward GEMM, CPU backward)
     trainer.ts        Training loop with stage strategy hook
+    evals.ts          Frozen held-out bank + evaluateModel
 ```
 
 ## Hybrid WebGPU path

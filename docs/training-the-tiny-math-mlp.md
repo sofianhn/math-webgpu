@@ -100,11 +100,39 @@ Hardened after `47×19` landed as #2 in top-k (813 vs 893): **more epochs alone 
 | **Simple** | 128 | 60 | 0.01 | 4096 | Faster, lighter mul mix |
 | **Ninja** (default) | 288 | 160 | 0.0045 | 12288 | `47×19` ✓ in `sweep-mul.ts` (~92% hard-mul pack) |
 
+## Saved checkpoints (instant load)
+
+Pretrained **Simple / Mid / Ninja** weights ship under `public/checkpoints/`. Each file stores:
+
+- weights (Float32 → base64)
+- hyperparams used for that run
+- per-epoch train + **frozen held-out** curves
+- final hold-out metrics (+ easy/hard/curriculum probes)
+
+On the live page: pick a saved model → curves + knobs appear immediately → **Run Eval** or **Train New** (from scratch with those knobs). Training from scratch is slow; loading is the fast path.
+
+| Mode | Hidden | Epochs | Role |
+| --- | ---: | ---: | --- |
+| **Simple** | 128 | 60 | Fast baseline |
+| **Mid** | 192 | 100 | Middle ground |
+| **Ninja** (default) | 288 | 160 | Hard mul/carry |
+
+## Post-training without English
+
+This MLP has **no language channel** — it cannot learn verbal chain-of-thought or English scratchpads. Useful post-train ideas that still fit:
+
+1. **Digit RL / correctness reward** — sample an answer, reward exact match (or partial credit on hundreds/tens/ones).
+2. **DPO-style preference on answer digits** — preferred vs rejected integer (or digit triple) for the same expression.
+3. **Self-consistency** — temperature / stochastic digit heads; keep the majority vote at inference.
+
+A stub lives in `src/posttrain.ts` (`runPostTrain`) mapped toward the existing `rl` stage — not wired into Train yet on purpose.
+
 ## What to try on the live page
 
-1. Leave **Ninja** selected, hit Train, wait for held-out accuracy to climb toward ~90%.
+1. Leave **Ninja** selected (auto-loads saved weights), inspect the held-out curve, hit **Run Eval**.
 2. Probe `47 + 38`, `17 × 19`, `25 × 25`, plus a frozen held-out row.
-3. Switch to **Simple** for a faster ~80% held-out pass.
-4. Try `100 + 3` (OOD) — still no hundreds *input* place.
+3. Switch to **Simple** or **Mid** for other saved runs.
+4. **Train New** only if you want to watch a from-scratch run (slow).
+5. Try `100 + 3` (OOD) — still no hundreds *input* place.
 
 **A model only learns the world you can represent — and only the objective you optimize.**

@@ -11,9 +11,9 @@
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Hit <strong>Train</strong> on default <strong>Ninja</strong> — mul/carry-weighted data and a
-        deeper trunk so hard products like <code>47 × 19</code> land, not just more epochs.
-        <strong>Simple</strong> is the faster pass.
+        Load a <strong>pretrained</strong> Simple / Mid / Ninja checkpoint for instant eval graphs,
+        or hit <strong>Train New</strong> to retrain from scratch (slow on phones).
+        Default weights = <strong>Ninja</strong> (mul/carry-tuned).
         <a class="blog-link" href="./training.html">Read the training blog →</a>
       </p>
 
@@ -22,25 +22,31 @@
       </section>
 
       <section id="controls" hidden>
-        <h3 class="subhead">Mode</h3>
-        <div class="presets mode-presets" role="group" aria-label="Training mode">
-          <button type="button" data-mode="simple" class="preset">Simple · fast</button>
-          <button type="button" data-mode="ninja" class="preset is-active">Ninja · hard muls</button>
+        <h3 class="subhead">Saved models</h3>
+        <div class="presets mode-presets" role="group" aria-label="Saved checkpoints">
+          <button type="button" data-ckpt="simple" class="preset">Simple</button>
+          <button type="button" data-ckpt="mid" class="preset">Mid</button>
+          <button type="button" data-ckpt="ninja" class="preset is-active">Ninja</button>
         </div>
         <p id="mode-blurb" class="hint">
-          Ninja default — overweight × / carries, deeper trunk, tens-digit emphasis. More epochs
-          alone is weak when the truth is already #2 in top-k.
+          Pick a saved model to load weights + hyperparams + training curves instantly.
         </p>
+        <p id="ckpt-meta" class="ckpt-meta" aria-live="polite"></p>
 
         <label class="check">
           <input id="heldout" type="checkbox" checked />
           Fair held-out each epoch (~10% frozen expressions; all digits stay in train)
         </label>
-        <button id="train" type="button">Train (pretrain)</button>
-        <button id="eval" type="button" disabled>Evaluate train-dist</button>
+
+        <div class="action-row">
+          <button id="load-ckpt" type="button">Load saved</button>
+          <button id="eval" type="button" disabled>Run Eval</button>
+          <button id="train" type="button">Train New</button>
+        </div>
+        <p id="eval-status" class="eval-status" aria-live="polite"></p>
 
         <details class="advanced">
-          <summary>Advanced knobs (filled by Simple / Ninja)</summary>
+          <summary>Advanced knobs (filled by saved model / Train New)</summary>
           <p class="hint">
             Domain = operands <strong>0–99</strong>. Digit-wise answer heads compose
             hundreds / tens / ones. Tweaking these leaves Mode on “custom.”
@@ -77,7 +83,7 @@
           every ones/tens digit. The panel lists expressions the optimizer never saw.
         </p>
         <div id="data-feed" class="data-feed" aria-live="polite">
-          <p class="data-headline">Hit Train to stream live batch examples here.</p>
+          <p class="data-headline">Hit Train New to stream live batch examples here.</p>
         </div>
         <h3 class="subhead">Held-out bank (eval only)</h3>
         <div id="hold-feed" class="data-feed" aria-live="polite">
@@ -87,9 +93,9 @@
 
       <section id="internals" hidden>
         <h2>Training internals</h2>
-        <p id="progress" class="progress" aria-live="polite">Idle — hit Train (Ninja default) to follow loss, perplexity &amp; held-out live.</p>
+        <p id="progress" class="progress" aria-live="polite">Idle — load a saved model or Train New.</p>
         <div class="progress-track" aria-hidden="true"><div id="progress-fill" class="progress-fill"></div></div>
-        <p id="smartness" class="smartness" aria-live="polite">Smartness: not trained yet</p>
+        <p id="smartness" class="smartness" aria-live="polite">Smartness: not loaded yet</p>
         <p id="eval-line" class="eval-line" aria-live="polite"></p>
         <svg id="curves" class="curves" xmlns="http://www.w3.org/2000/svg"></svg>
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
@@ -105,7 +111,7 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          After Ninja training, try <code>47 × 19</code> (the tough case), plus
+          After loading Ninja (or training), try <code>47 × 19</code>,
           <code>17 × 19</code>, <code>25 × 25</code>, and a held-out bank row.
         </p>
         <div class="row">
@@ -123,6 +129,19 @@
         <p id="prediction"></p>
         <h3 class="subhead">Top answer probabilities (composed digits)</h3>
         <div id="topk" class="topk"></div>
+      </section>
+
+      <section id="posttrain-note" class="posttrain-note" hidden>
+        <h2>After pretrain — without English</h2>
+        <p class="hint">
+          This net has no language channel, so it cannot learn verbal chain-of-thought.
+          Useful post-training stays numeric:
+          <strong>digit RL / correctness reward</strong>,
+          <strong>DPO-style preference on answer digits</strong>,
+          and <strong>self-consistency</strong> (majority vote over digit heads).
+          A stub hook lives in <code>src/posttrain.ts</code> for later — not wired to Train yet.
+        </p>
+        <button id="posttrain-stub" type="button" disabled title="Stub only">Post-train (soon)</button>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>
