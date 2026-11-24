@@ -20,6 +20,7 @@ import type { TrainMetrics } from "./types";
 import { renderCurves, renderDataFeed, renderNormBars, renderTopK } from "./viz";
 import {
   FAIR_HOLDOUT_PCT,
+  FAIR_HOLDOUT_SEED,
   batchFromExprs,
   buildExpressionHoldout,
   evaluateModel,
@@ -27,13 +28,16 @@ import {
 } from "./evals";
 import { DEFAULT_MODE, MODE_PRESETS, type ModeId, type ModePreset } from "./presets";
 import {
+  buildCheckpointMeta,
+  downloadCheckpoint,
   fetchCheckpoint,
   fetchManifest,
   loadWeights,
+  packCheckpoint,
   type CheckpointFile,
   type CheckpointId,
 } from "./checkpoint";
-import { describePostTrain, runPostTrain } from "./posttrain";
+import { describePostTrain, runPostTrain, type DigitRlResult } from "./posttrain";
 
 const statusEl = document.querySelector("#status")!;
 const controlsEl = document.querySelector<HTMLElement>("#controls")!;
@@ -48,7 +52,8 @@ const trainBtn = document.querySelector<HTMLButtonElement>("#train")!;
 const evalBtn = document.querySelector<HTMLButtonElement>("#eval")!;
 const loadCkptBtn = document.querySelector<HTMLButtonElement>("#load-ckpt")!;
 const predictBtn = document.querySelector<HTMLButtonElement>("#predict")!;
-const posttrainBtn = document.querySelector<HTMLButtonElement>("#posttrain-stub")!;
+const digitRlBtn = document.querySelector<HTMLButtonElement>("#digit-rl")!;
+const saveCkptBtn = document.querySelector<HTMLButtonElement>("#save-ckpt")!;
 const predictionEl = document.querySelector("#prediction")!;
 const oodEl = document.querySelector<HTMLElement>("#ood")!;
 const curvesEl = document.querySelector<SVGSVGElement>("#curves")!;
@@ -63,18 +68,24 @@ const tokenCountEl = document.querySelector("#token-count")!;
 const modeBlurbEl = document.querySelector("#mode-blurb")!;
 const ckptMetaEl = document.querySelector("#ckpt-meta")!;
 const evalStatusEl = document.querySelector<HTMLElement>("#eval-status")!;
+const rlStatusEl = document.querySelector<HTMLElement>("#rl-status")!;
+const rlDeltaEl = document.querySelector<HTMLElement>("#rl-delta")!;
 const epochsInput = document.querySelector<HTMLInputElement>("#epochs")!;
 const batchInput = document.querySelector<HTMLInputElement>("#batch")!;
 const examplesInput = document.querySelector<HTMLInputElement>("#examples")!;
 const lrInput = document.querySelector<HTMLInputElement>("#lr")!;
 const hiddenInput = document.querySelector<HTMLInputElement>("#hidden")!;
 const heldoutInput = document.querySelector<HTMLInputElement>("#heldout")!;
+const rlStepsInput = document.querySelector<HTMLInputElement>("#rl-steps")!;
+const rlLrInput = document.querySelector<HTMLInputElement>("#rl-lr")!;
 const aInput = document.querySelector<HTMLInputElement>("#a")!;
 const bInput = document.querySelector<HTMLInputElement>("#b")!;
 
 let activeMode: ModeId | "custom" = DEFAULT_MODE;
 let loadedCkpt: CheckpointFile | null = null;
 let modelReady = false;
+let lastRlResult: DigitRlResult | null = null;
+let postRlCkpt: CheckpointFile | null = null;
 
 function paint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -199,11 +210,19 @@ async function boot() {
       log("No checkpoint manifest found — Train New still works; Load saved needs public/checkpoints/.");
     }
 
+    const setRlStatus = (text: string, kind: "" | "ok" | "error" = "") => {
+      rlStatusEl.textContent = text;
+      rlStatusEl.classList.toggle("is-ok", kind === "ok");
+      rlStatusEl.classList.toggle("is-error", kind === "error");
+    };
+
     const setBusy = (busy: boolean) => {
       trainBtn.disabled = busy;
       evalBtn.disabled = busy || !modelReady;
       loadCkptBtn.disabled = busy;
       predictBtn.disabled = busy || !modelReady;
+      digitRlBtn.disabled = busy || !modelReady;
+      saveCkptBtn.disabled = busy || !postRlCkpt;
     };
 
     const applyCheckpoint = async (ckpt: CheckpointFile, opts?: { silent?: boolean }) => {
@@ -240,8 +259,14 @@ async function boot() {
           `Loaded checkpoint ${ckpt.id} (${ckpt.arch.paramCount.toLocaleString()} params, ${ckpt.curves.length} epoch curves).`,
         );
       }
+      lastRlResult = null;
+      postRlCkpt = null;
+      rlDeltaEl.textContent = "";
+      setRlStatus("");
       evalBtn.disabled = false;
       predictBtn.disabled = false;
+      digitRlBtn.disabled = false;
+      saveCkptBtn.disabled = true;
     };
 
     const loadSelected = async () => {
@@ -509,13 +534,129 @@ async function boot() {
       });
     }
 
-    posttrainBtn.addEventListener("click", () => {
-      log(`Post-train stub: ${describePostTrain("digit-rl")}`);
-      void runPostTrain(model, { kind: "digit-rl" }).catch((err) => {
-        log(err instanceof Error ? err.message : String(err));
+    const formatPct = (x: number) => `${(x * 100).toFixed(1)}%`;
+    const formatDelta = (d: number) => `${d >= 0 ? "+" : ""}${(d * 100).toFixed(1)} pp`;
+
+    const buildPostRlCheckpoint = (result: DigitRlResult): CheckpointFile => {
+      const baseId = (loadedCkpt?.id ?? (activeMode === "custom" ? DEFAULT_MODE : activeMode)) as CheckpointId;
+      const baseLabel = loadedCkpt?.label ?? MODE_PRESETS[baseId]?.label ?? String(baseId);
+      const hp = loadedCkpt?.hyperparams ?? {
+        hidden: model.hidden,
+        epochs: Number(epochsInput.value) || 0,
+        lr: Number(lrInput.value) || 0,
+        examples: Number(examplesInput.value) || 0,
+        batch: Number(batchInput.value) || 64,
+        mix: baseId === "simple" ? ("simple" as const) : ("ninja" as const),
+        hardBias: MODE_PRESETS[baseId]?.hardBias ?? 0.45,
+        heldout: heldoutInput.checked,
+      };
+      const meta = buildCheckpointMeta({
+        id: baseId,
+        label: `${baseLabel} + digit RL`,
+        blurb: `Digit RL (${result.steps} steps) on ${baseLabel}. Hold-out ${formatPct(result.beforeHoldout.accuracy)} → ${formatPct(result.afterHoldout.accuracy)} (${formatDelta(result.holdoutDelta)}). ${describePostTrain("digit-rl")}`,
+        hyperparams: hp,
+        holdout: {
+          pct: FAIR_HOLDOUT_PCT,
+          n: result.afterHoldout.n,
+          seed: FAIR_HOLDOUT_SEED,
+        },
+        curves: history,
+        finalHoldout: result.afterHoldout,
+        probes: loadedCkpt?.probes,
+        paramCount: TinyMathMlp.paramCount(model.hidden),
       });
-    });
-    posttrainBtn.disabled = false;
+      const ckpt = packCheckpoint(meta, model);
+      ckpt.postTrain = {
+        kind: "digit-rl",
+        steps: result.steps,
+        meanReward: result.meanReward,
+        beforeHoldout: result.beforeHoldout,
+        afterHoldout: result.afterHoldout,
+        holdoutDelta: result.holdoutDelta,
+        baseId,
+      };
+      return ckpt;
+    };
+
+    const runDigitRlUi = async () => {
+      if (!modelReady) {
+        setRlStatus("Load a saved model (or finish Train New) before Digit RL.", "error");
+        return;
+      }
+      setBusy(true);
+      setRlStatus("Digit RL: measuring hold-out before…");
+      rlDeltaEl.textContent = "";
+      postRlCkpt = null;
+      lastRlResult = null;
+      await paint();
+      const steps = Math.max(5, Math.min(400, Number(rlStepsInput.value) || 80));
+      const rlLr = Math.max(0.0001, Number(rlLrInput.value) || 0.0015);
+      rlStepsInput.value = String(steps);
+      rlLrInput.value = String(rlLr);
+      const beforeNorms = model.weightNorms();
+      log(
+        `Digit RL — ${describePostTrain("digit-rl")} · steps=${steps} · lr=${rlLr} · held-out bank n=${holdExprs.length}`,
+      );
+      try {
+        const result = await runPostTrain(model, {
+          kind: "digit-rl",
+          steps,
+          learningRate: rlLr,
+          holdoutExprs: holdExprs,
+          onStep: async (m) => {
+            progressFill.style.width = `${((m.step / m.steps) * 100).toFixed(1)}%`;
+            progressEl.textContent = `Digit RL ${m.step}/${m.steps} · reward ${m.meanReward.toFixed(3)} · digit-acc ${(m.meanDigitAcc * 100).toFixed(1)}% · exact ${(m.exactRate * 100).toFixed(1)}%`;
+            setRlStatus(
+              `RL step ${m.step}/${m.steps}: reward ${m.meanReward.toFixed(3)} · greedy digits ${(m.greedyDigitAcc * 100).toFixed(1)}%`,
+            );
+            if (m.step === m.steps || m.step % Math.max(1, Math.floor(m.steps / 6)) === 0) {
+              log(
+                `rl ${String(m.step).padStart(3)}  reward=${m.meanReward.toFixed(4)}  digit=${(m.meanDigitAcc * 100).toFixed(1)}%  exact=${(m.exactRate * 100).toFixed(1)}%  adv=${m.meanAdvantage.toFixed(4)}`,
+              );
+              await paint();
+            }
+          },
+        });
+        lastRlResult = result;
+        postRlCkpt = buildPostRlCheckpoint(result);
+        renderNormBars(normsEl, beforeNorms, model.weightNorms());
+        const before = formatPct(result.beforeHoldout.accuracy);
+        const after = formatPct(result.afterHoldout.accuracy);
+        const delta = formatDelta(result.holdoutDelta);
+        rlDeltaEl.textContent = `Hold-out before ${before} → after ${after} (${delta}) · n=${result.afterHoldout.n}`;
+        evalLineEl.textContent = `After digit RL: hold-out ${after} (was ${before}, ${delta}) on ${result.afterHoldout.n} exprs`;
+        setRlStatus(`Digit RL done · mean reward ${result.meanReward.toFixed(3)} · ${delta} hold-out`, "ok");
+        progressEl.textContent = `Digit RL done · hold-out ${before} → ${after}`;
+        progressFill.style.width = "100%";
+        ckptMetaEl.textContent = `${postRlCkpt.label}: hold-out ${before} → ${after} (${delta}). Hit Save checkpoint to download JSON.`;
+        log(
+          `Digit RL finished: HOLD ${before} → ${after} (${delta}) · mean reward ${result.meanReward.toFixed(4)}`,
+        );
+        const score = await curriculumScore(model);
+        smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — after digit RL`;
+        rlStatusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setRlStatus(`Digit RL failed: ${message}`, "error");
+        log(`Digit RL failed: ${message}`);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const savePostRlCheckpoint = () => {
+      if (!postRlCkpt) {
+        setRlStatus("Run Digit RL first, then Save checkpoint.", "error");
+        return;
+      }
+      const fname = `${postRlCkpt.id}-digit-rl-checkpoint.json`;
+      downloadCheckpoint(postRlCkpt, fname);
+      setRlStatus(`Saved ${fname} (${postRlCkpt.arch.paramCount.toLocaleString()} params).`, "ok");
+      log(`Downloaded ${fname}`);
+    };
+
+    digitRlBtn.addEventListener("click", () => void runDigitRlUi());
+    saveCkptBtn.addEventListener("click", () => savePostRlCheckpoint());
 
     const previewFilter = (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b);
     const previewPipe = new MathDataPipeline(

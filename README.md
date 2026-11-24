@@ -2,13 +2,13 @@
 
 Minimal TypeScript + WebGPU project: a tiny MLP learns basic arithmetic (add / sub / mul / div on digits 0–9) in the browser.
 
-Architecture is staged for **pretrain → finetune → rl**. Only **pretrain** (synthetic arithmetic → answer classification) is implemented; interfaces leave clear plug-in points for the later stages.
+Architecture is staged for **pretrain → finetune → rl**. **Pretrain** and **digit RL** post-training are implemented in-browser; finetune remains a plug-in point.
 
 ## Live demo (GitHub Pages)
 
 **https://sofianhn.github.io/math-webgpu/**
 
-Two-digit operands **0–99**. Load pretrained **Simple / Mid / Ninja** checkpoints for instant curves + eval, or **Train New** from scratch. See the training blog: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md).
+Two-digit operands **0–99**. Load pretrained **Simple / Mid / Ninja** checkpoints, run **Digit RL** (digit-wise correctness reward, no English), compare hold-out before→after, and **Save checkpoint**. Or **Train New** from scratch. See the training blog: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md).
 
 ## Requirements
 
@@ -27,10 +27,12 @@ npm install
 npm run dev
 ```
 
-Open the URL Vite prints (default `http://localhost:5173`). A saved **Ninja** checkpoint loads by default — inspect curves, **Run Eval**, or **Train New**. Offline pretrain:
+Open the URL Vite prints (default `http://localhost:5173`). A saved **Ninja** checkpoint loads by default — inspect curves, **Run Eval**, **Digit RL**, or **Train New**. Offline:
 
 ```bash
-npm run pretrain:checkpoints
+npm run pretrain:checkpoints   # rebuild Simple/Mid/Ninja weights
+npm run rl:digit               # digit RL on Ninja; prints hold-out Δ
+CHECKPOINT=simple RL_STEPS=80 npm run rl:digit
 ```
 
 Clone:
@@ -56,7 +58,7 @@ math-webgpu/
   src/
     main.ts           Boot WebGPU, load checkpoints / train / eval / predict
     checkpoint.ts     Weights + hyperparams + curve format
-    posttrain.ts      Stub: digit RL / DPO digits / self-consistency
+    posttrain.ts      Digit RL (REINFORCE + digit reward); DPO/self-consistency stubs
     viz.ts            Loss/acc curves, weight norms, top-k probs
     style.css
     presets.ts        Simple / Mid / Ninja hyperparams
@@ -82,5 +84,5 @@ math-webgpu/
 ## Stages
 
 - `pretrain` — implemented (`ArithmeticDataset` → CE classification)
-- `finetune` — `MathDataPipeline` / `MathTrainer` reject until you add instruction data + strategy
-- `rl` — same; plug preference/reward batches into `DataPipeline` + `StageStrategy`
+- `finetune` — `MathDataPipeline` rejects until you add instruction data + strategy
+- `rl` — digit RL in `src/posttrain.ts` (correctness reward on H/T/O); pipeline samples arithmetic rows for the RL loop

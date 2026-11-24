@@ -113,11 +113,10 @@
         <h2>Post-training without English</h2>
         <p>
           There is no language channel, so verbal chain-of-thought cannot be learned here.
-          Useful post-train signals stay numeric:
-          <strong>digit RL / correctness reward</strong>,
-          <strong>DPO-style preference on answer digits</strong>, and
-          <strong>self-consistency</strong> (majority vote over digit heads).
-          See <code>src/posttrain.ts</code> for a stub hook — not overbuilt into Train yet.
+          <strong>Digit RL</strong> is wired on the live page: sample H/T/O, reward digit-wise
+          correctness, update the loaded checkpoint, show hold-out before→after, then save a
+          new JSON. DPO-style digit preferences and self-consistency remain stubs in
+          <code>src/posttrain.ts</code>. Offline: <code>npm run rl:digit</code>.
         </p>
 
         <h2>What to try</h2>

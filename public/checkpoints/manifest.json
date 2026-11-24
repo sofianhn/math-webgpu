@@ -4,7 +4,7 @@
     {
       "id": "simple",
       "label": "Simple",
-      "blurb": "Faster train · lighter mul mix · solid everyday arithmetic",
+      "blurb": "Faster train \u00b7 lighter mul mix \u00b7 solid everyday arithmetic",
       "path": "checkpoints/simple.json",
       "hidden": 128,
       "epochs": 60,
@@ -14,7 +14,7 @@
     {
       "id": "mid",
       "label": "Mid",
-      "blurb": "Middle ground · H192 · more mul bias than Simple, shorter than Ninja",
+      "blurb": "Middle ground \u00b7 H192 \u00b7 more mul bias than Simple, shorter than Ninja",
       "path": "checkpoints/mid.json",
       "hidden": 192,
       "epochs": 100,
@@ -24,12 +24,23 @@
     {
       "id": "ninja",
       "label": "Ninja",
-      "blurb": "Default · mul/carry-weighted data, deeper trunk, H288 — tuned so hard products like 47×19 land",
+      "blurb": "Default \u00b7 mul/carry-weighted data, deeper trunk, H288 \u2014 tuned so hard products like 47\u00d719 land",
       "path": "checkpoints/ninja.json",
       "hidden": 288,
       "epochs": 160,
       "paramCount": 104862,
       "finalHoldoutAcc": 0.945
+    }
+  ],
+  "postTrainArtifacts": [
+    {
+      "id": "ninja-digit-rl",
+      "label": "Ninja + digit RL",
+      "path": "checkpoints/ninja-digit-rl.json",
+      "baseId": "ninja",
+      "finalHoldoutAcc": 0.95,
+      "holdoutDelta": 0.005,
+      "note": "Offline digit RL (80 steps). Live UI can regenerate/save after Run Digit RL."
     }
   ]
 }

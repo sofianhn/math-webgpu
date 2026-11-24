@@ -225,8 +225,9 @@ export class ArithmeticDataset implements Dataset {
 }
 
 /**
- * Stage-aware pipeline. pretrain → synthetic arithmetic.
- * finetune / rl hooks throw until implemented (keeps the plug-in surface clear).
+ * Stage-aware pipeline. pretrain / rl → synthetic arithmetic batches
+ * (rl rewards are applied in `src/posttrain.ts`, not here).
+ * finetune still throws until instruction packs land.
  */
 export class MathDataPipeline implements DataPipeline {
   readonly stage: TrainingStage;
@@ -246,9 +247,7 @@ export class MathDataPipeline implements DataPipeline {
     if (this.stage === "finetune") {
       throw new Error("finetune pipeline not implemented — plug instruction/answer packs here.");
     }
-    if (this.stage === "rl") {
-      throw new Error("rl pipeline not implemented — plug preference / reward batches here.");
-    }
+    // pretrain + rl both draw arithmetic rows; digit-RL shapes the loss in posttrain.
     return this.dataset.sample(batchSize);
   }
 }
