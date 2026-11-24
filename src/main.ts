@@ -589,7 +589,7 @@ async function boot() {
       postRlCkpt = null;
       lastRlResult = null;
       await paint();
-      const steps = Math.max(5, Math.min(400, Number(rlStepsInput.value) || 60));
+      const steps = Math.max(5, Math.min(400, Number(rlStepsInput.value) || 80));
       const rlLr = Math.max(0.0001, Number(rlLrInput.value) || 0.0015);
       rlStepsInput.value = String(steps);
       rlLrInput.value = String(rlLr);

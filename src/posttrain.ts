@@ -206,7 +206,7 @@ export async function runDigitRl(
   model: TinyMathMlp,
   config: Omit<PostTrainConfig, "kind"> = {},
 ): Promise<DigitRlResult> {
-  const steps = Math.max(1, config.steps ?? 60);
+  const steps = Math.max(1, config.steps ?? 80);
   const batchSize = Math.max(4, config.batchSize ?? 32);
   const learningRate = config.learningRate ?? 0.0015;
   const temperature = config.temperature ?? 1.0;
