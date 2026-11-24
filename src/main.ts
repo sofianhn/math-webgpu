@@ -173,7 +173,6 @@ async function boot() {
     let model = new TinyMathMlp(gpu, MODE_PRESETS.ninja.hidden);
     const trainer = new MathTrainer();
     let history: TrainMetrics[] = [];
-    const beforeNormsByHidden = new Map<number, ReturnType<TinyMathMlp["weightNorms"]>>();
 
     const smoke = await gpu.matmul(
       new Float32Array([1, 2, 3, 4]),
@@ -330,7 +329,6 @@ async function boot() {
 
       model = new TinyMathMlp(gpu, hidden);
       const beforeNorms = model.weightNorms();
-      beforeNormsByHidden.set(hidden, beforeNorms);
       history = [];
       loadedCkpt = null;
       modelReady = false;
