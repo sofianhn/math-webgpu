@@ -292,6 +292,18 @@ export class TinyMathMlp implements Model {
     }
   }
 
+  /** Overwrite parameters from another model's tensors (same hidden size). */
+  loadFrom(other: TinyMathMlp): void {
+    if (other.hidden !== this.hidden) {
+      throw new Error(`hidden mismatch: ${other.hidden} vs ${this.hidden}`);
+    }
+    const src = other.parameters();
+    const dst = this.parameters();
+    for (let i = 0; i < dst.length; i++) {
+      dst[i]!.tensor.data.set(src[i]!.tensor.data);
+    }
+  }
+
   async predict(features: Float32Array): Promise<{ answer: number; probs: Float32Array }> {
     const { logits } = await this.forward(tensor([1, INPUT_DIM], features));
     const probs = softmaxRows(logits.data, 1, NUM_CLASSES);
