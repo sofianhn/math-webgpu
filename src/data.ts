@@ -105,14 +105,62 @@ export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
 
 export type SampleFilter = (a: number, b: number, op: Op) => boolean;
 
-function sampleInRange(filter?: SampleFilter): { a: number; op: Op; b: number; answer: number } {
-  for (let attempt = 0; attempt < 80; attempt++) {
-    const a = Math.floor(Math.random() * (MAX_OPERAND + 1));
-    const b = Math.floor(Math.random() * (MAX_OPERAND + 1));
-    const op = OPS[Math.floor(Math.random() * OPS.length)]!;
+/** How often each op appears. Ninja favors mul + carry-heavy add. */
+export type OpMix = Record<Op, number>;
+
+export const BALANCED_MIX: OpMix = { "+": 1, "-": 1, "*": 1, "/": 1 };
+
+/** Empirically better for hard two-digit products / carries. */
+export const NINJA_MIX: OpMix = { "+": 0.28, "-": 0.12, "*": 0.48, "/": 0.12 };
+
+function pickOp(mix: OpMix): Op {
+  const entries = OPS.map((op) => [op, mix[op]] as const);
+  const total = entries.reduce((s, [, w]) => s + w, 0);
+  let r = Math.random() * total;
+  for (const [op, w] of entries) {
+    r -= w;
+    if (r <= 0) return op;
+  }
+  return "*";
+}
+
+/** Ones-digit carry on addition, or both operands ≥10 for mul — harder cases. */
+function isHardCase(a: number, b: number, op: Op): boolean {
+  if (op === "+") return (a % 10) + (b % 10) >= 10;
+  if (op === "*") return a >= 10 && b >= 10 && a * b < NUM_CLASSES;
+  if (op === "-") return a % 10 < b % 10; // borrow
+  return b > 1 && a % b !== 0; // non-trivial div
+}
+
+function sampleInRange(
+  filter?: SampleFilter,
+  mix: OpMix = BALANCED_MIX,
+  hardBias = 0,
+): { a: number; op: Op; b: number; answer: number } {
+  for (let attempt = 0; attempt < 120; attempt++) {
+    const preferHard = hardBias > 0 && Math.random() < hardBias;
+    let a = Math.floor(Math.random() * (MAX_OPERAND + 1));
+    let b = Math.floor(Math.random() * (MAX_OPERAND + 1));
+    const op = pickOp(mix);
+    if (preferHard) {
+      if (op === "*") {
+        a = 10 + Math.floor(Math.random() * 90);
+        b = 10 + Math.floor(Math.random() * 90);
+        if (a * b >= NUM_CLASSES) {
+          b = Math.max(10, Math.floor(999 / a));
+        }
+      } else if (op === "+") {
+        const ao = Math.floor(Math.random() * 10);
+        const bo = Math.floor(Math.random() * (10 - ao)) + (9 - ao); // force carry often
+        a = Math.floor(Math.random() * 10) * 10 + ao;
+        b = Math.floor(Math.random() * 10) * 10 + Math.min(9, bo);
+      }
+    }
     if (filter && !filter(a, b, op)) continue;
     const answer = computeAnswer(a, op, b);
-    if (answer < NUM_CLASSES) return { a, op, b, answer };
+    if (answer >= NUM_CLASSES) continue;
+    if (preferHard && !isHardCase(a, b, op) && attempt < 80) continue;
+    return { a, op, b, answer };
   }
   // Fallback that always fits class range; still respects filter when possible.
   for (let a = 0; a <= 20; a++) {
@@ -124,13 +172,31 @@ function sampleInRange(filter?: SampleFilter): { a: number; op: Op; b: number; a
   return { a: 0, op: "+", b: 0, answer: 0 };
 }
 
+export type DatasetOptions = {
+  filter?: SampleFilter;
+  /** Op sampling weights. */
+  mix?: OpMix;
+  /** Probability of forcing a hard (carry / two-digit mul) draw. */
+  hardBias?: number;
+};
+
 /** Synthetic arithmetic dataset for pre-training (answer classification). */
 export class ArithmeticDataset implements Dataset {
   readonly name = "synthetic-arithmetic-2digit";
   private readonly filter?: SampleFilter;
+  private readonly mix: OpMix;
+  private readonly hardBias: number;
 
-  constructor(filter?: SampleFilter) {
-    this.filter = filter;
+  constructor(filterOrOpts?: SampleFilter | DatasetOptions) {
+    if (typeof filterOrOpts === "function") {
+      this.filter = filterOrOpts;
+      this.mix = BALANCED_MIX;
+      this.hardBias = 0;
+    } else {
+      this.filter = filterOrOpts?.filter;
+      this.mix = filterOrOpts?.mix ?? BALANCED_MIX;
+      this.hardBias = filterOrOpts?.hardBias ?? 0;
+    }
   }
 
   size(): number {
@@ -144,7 +210,7 @@ export class ArithmeticDataset implements Dataset {
     const texts: string[] = [];
 
     for (let i = 0; i < batchSize; i++) {
-      const { a, op, b, answer } = sampleInRange(this.filter);
+      const { a, op, b, answer } = sampleInRange(this.filter, this.mix, this.hardBias);
       inputs.set(encodeFeatures(a, op, b), i * INPUT_DIM);
       targets[i] = answer;
       texts.push(describeExample(a, op, b, answer));

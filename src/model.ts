@@ -8,12 +8,9 @@ export const DEFAULT_HIDDEN = 96;
 export const DIGIT_CLASSES = 10;
 
 /**
- * Place-value MLP: shared trunk → three digit heads (hundreds, tens, ones).
- * The answer is composed as 100·H + 10·T + O instead of a flat 1000-way table.
- * That pushes the net toward digit structure instead of memorizing class IDs.
- *
- * Forward still exposes [batch, 1000] log-prob logits (product of digit
- * softmaxes) so the trainer/UI keep working; backward uses digit CE.
+ * Two-layer place-value MLP: input → ReLU → ReLU → digit heads (H/T/O).
+ * Deeper trunk helps hard multiplies where tens digit is the usual failure.
+ * Answer = 100·H + 10·T + O; backward uses digit CE (tens weighted slightly higher).
  */
 export class TinyMathMlp implements Model {
   readonly name = "digit-math-mlp";
@@ -24,6 +21,8 @@ export class TinyMathMlp implements Model {
   private readonly gpu: MatmulBackend;
   private readonly W1: Tensor;
   private readonly b1: Tensor;
+  private readonly W2: Tensor;
+  private readonly b2: Tensor;
   /** Hundreds / tens / ones heads. */
   private readonly Wh: Tensor;
   private readonly bh: Tensor;
@@ -37,6 +36,8 @@ export class TinyMathMlp implements Model {
     this.hidden = hidden;
     this.W1 = randn([INPUT_DIM, hidden], Math.sqrt(2 / INPUT_DIM));
     this.b1 = zeros([hidden]);
+    this.W2 = randn([hidden, hidden], Math.sqrt(2 / hidden));
+    this.b2 = zeros([hidden]);
     const scale = Math.sqrt(2 / hidden);
     this.Wh = randn([hidden, DIGIT_CLASSES], scale);
     this.bh = zeros([DIGIT_CLASSES]);
@@ -46,9 +47,9 @@ export class TinyMathMlp implements Model {
     this.bo = zeros([DIGIT_CLASSES]);
   }
 
-  /** Parameter count for the digit-head architecture. */
+  /** Parameter count for the two-layer digit-head architecture. */
   static paramCount(hidden: number): number {
-    const trunk = INPUT_DIM * hidden + hidden;
+    const trunk = INPUT_DIM * hidden + hidden + hidden * hidden + hidden;
     const head = hidden * DIGIT_CLASSES + DIGIT_CLASSES;
     return trunk + 3 * head;
   }
@@ -65,6 +66,8 @@ export class TinyMathMlp implements Model {
     return [
       { name: "W1", tensor: this.W1 },
       { name: "b1", tensor: this.b1 },
+      { name: "W2", tensor: this.W2 },
+      { name: "b2", tensor: this.b2 },
       { name: "Wh", tensor: this.Wh },
       { name: "bh", tensor: this.bh },
       { name: "Wt", tensor: this.Wt },
@@ -76,17 +79,23 @@ export class TinyMathMlp implements Model {
 
   private async trunk(inputs: Tensor): Promise<{
     B: number;
-    hPre: Float32Array;
-    h: Float32Array;
+    h1Pre: Float32Array;
+    h1: Float32Array;
+    h2Pre: Float32Array;
+    h2: Float32Array;
   }> {
     const [B, D] = inputs.shape;
     const H = this.hidden;
     if (D !== INPUT_DIM) throw new Error(`expected inputDim ${INPUT_DIM}, got ${D}`);
-    const hPreData = await this.gpu.matmul(inputs.data, this.W1.data, B, INPUT_DIM, H);
-    addBiasInPlace(hPreData, B, H, this.b1.data);
-    const hData = hPreData.slice();
-    reluInPlace(hData);
-    return { B, hPre: hPreData, h: hData };
+    const h1Pre = await this.gpu.matmul(inputs.data, this.W1.data, B, INPUT_DIM, H);
+    addBiasInPlace(h1Pre, B, H, this.b1.data);
+    const h1 = h1Pre.slice();
+    reluInPlace(h1);
+    const h2Pre = await this.gpu.matmul(h1, this.W2.data, B, H, H);
+    addBiasInPlace(h2Pre, B, H, this.b2.data);
+    const h2 = h2Pre.slice();
+    reluInPlace(h2);
+    return { B, h1Pre, h1, h2Pre, h2 };
   }
 
   private digitLogits(h: Float32Array, B: number): {
@@ -117,7 +126,6 @@ export class TinyMathMlp implements Model {
     return { hundreds, tens, ones };
   }
 
-  /** Compose independent digit softmaxes into [B, 1000] log-probs (valid after softmax). */
   private composeClassLogits(
     ph: Float32Array,
     pt: Float32Array,
@@ -141,8 +149,8 @@ export class TinyMathMlp implements Model {
   }
 
   async forward(inputs: Tensor): Promise<ForwardResult> {
-    const { B, hPre, h } = await this.trunk(inputs);
-    const { hundreds, tens, ones } = this.digitLogits(h, B);
+    const { B, h1Pre, h1, h2Pre, h2 } = await this.trunk(inputs);
+    const { hundreds, tens, ones } = this.digitLogits(h2, B);
     const ph = softmaxRows(hundreds, B, DIGIT_CLASSES);
     const pt = softmaxRows(tens, B, DIGIT_CLASSES);
     const po = softmaxRows(ones, B, DIGIT_CLASSES);
@@ -152,8 +160,10 @@ export class TinyMathMlp implements Model {
       logits: tensor([B, NUM_CLASSES], logitsData),
       cache: {
         x: inputs,
-        hPre: tensor([B, this.hidden], hPre),
-        h: tensor([B, this.hidden], h),
+        h1Pre: tensor([B, this.hidden], h1Pre),
+        h1: tensor([B, this.hidden], h1),
+        h2Pre: tensor([B, this.hidden], h2Pre),
+        h: tensor([B, this.hidden], h2),
         hundreds: tensor([B, DIGIT_CLASSES], hundreds),
         tens: tensor([B, DIGIT_CLASSES], tens),
         ones: tensor([B, DIGIT_CLASSES], ones),
@@ -164,8 +174,10 @@ export class TinyMathMlp implements Model {
 
   backward(cache: Record<string, Tensor>, targets: Int32Array): Map<string, Tensor> {
     const x = cache.x!;
-    const h = cache.h!;
-    const hPre = cache.hPre!;
+    const h1 = cache.h1!;
+    const h1Pre = cache.h1Pre!;
+    const h2 = cache.h!;
+    const h2Pre = cache.h2Pre!;
     const hundreds = cache.hundreds!;
     const tens = cache.tens!;
     const ones = cache.ones!;
@@ -176,7 +188,7 @@ export class TinyMathMlp implements Model {
     const pt = softmaxRows(tens.data, B, DIGIT_CLASSES);
     const po = softmaxRows(ones.data, B, DIGIT_CLASSES);
 
-    const dH = new Float32Array(B * H);
+    const dH2 = new Float32Array(B * H);
     const dWh = zeros([H, DIGIT_CLASSES]);
     const dbh = zeros([DIGIT_CLASSES]);
     const dWt = zeros([H, DIGIT_CLASSES]);
@@ -184,30 +196,32 @@ export class TinyMathMlp implements Model {
     const dWo = zeros([H, DIGIT_CLASSES]);
     const dbo = zeros([DIGIT_CLASSES]);
 
+    // Tens digit is the usual miss on hard muls (e.g. 47×19 → 813 vs 893).
     const accumHead = (
       probs: Float32Array,
       W: Tensor,
       dW: Tensor,
       db: Tensor,
       digitOf: (t: number) => number,
+      weight: number,
     ) => {
       const dLogits = probs.slice();
       for (let i = 0; i < B; i++) {
         const dig = digitOf(targets[i]!);
         dLogits[i * DIGIT_CLASSES + dig]! -= 1;
       }
-      for (let i = 0; i < dLogits.length; i++) dLogits[i]! /= B;
+      for (let i = 0; i < dLogits.length; i++) dLogits[i]! = (dLogits[i]! / B) * weight;
 
       for (let i = 0; i < B; i++) {
         for (let k = 0; k < H; k++) {
-          const hk = h.data[i * H + k]!;
+          const hk = h2.data[i * H + k]!;
           let back = 0;
           for (let d = 0; d < DIGIT_CLASSES; d++) {
             const g = dLogits[i * DIGIT_CLASSES + d]!;
             dW.data[k * DIGIT_CLASSES + d]! += hk * g;
             back += g * W.data[k * DIGIT_CLASSES + d]!;
           }
-          dH[i * H + k]! += back;
+          dH2[i * H + k]! += back;
         }
         for (let d = 0; d < DIGIT_CLASSES; d++) {
           db.data[d]! += dLogits[i * DIGIT_CLASSES + d]!;
@@ -215,13 +229,33 @@ export class TinyMathMlp implements Model {
       }
     };
 
-    accumHead(ph, this.Wh, dWh, dbh, (t) => Math.floor(t / 100));
-    accumHead(pt, this.Wt, dWt, dbt, (t) => Math.floor(t / 10) % 10);
-    accumHead(po, this.Wo, dWo, dbo, (t) => t % 10);
+    accumHead(ph, this.Wh, dWh, dbh, (t) => Math.floor(t / 100), 1.0);
+    accumHead(pt, this.Wt, dWt, dbt, (t) => Math.floor(t / 10) % 10, 1.35);
+    accumHead(po, this.Wo, dWo, dbo, (t) => t % 10, 1.0);
 
-    const dHPre = dH.slice();
-    for (let i = 0; i < dHPre.length; i++) {
-      if (hPre.data[i]! <= 0) dHPre[i] = 0;
+    const dH2Pre = dH2.slice();
+    for (let i = 0; i < dH2Pre.length; i++) {
+      if (h2Pre.data[i]! <= 0) dH2Pre[i] = 0;
+    }
+
+    // dW2 = h1^T @ dH2Pre ; dH1 = dH2Pre @ W2^T
+    const dW2 = zeros([H, H]);
+    const db2 = zeros([H]);
+    const dH1 = new Float32Array(B * H);
+    for (let i = 0; i < B; i++) {
+      for (let k = 0; k < H; k++) {
+        const g = dH2Pre[i * H + k]!;
+        db2.data[k]! += g;
+        for (let j = 0; j < H; j++) {
+          dW2.data[j * H + k]! += h1.data[i * H + j]! * g;
+          dH1[i * H + j]! += g * this.W2.data[j * H + k]!;
+        }
+      }
+    }
+
+    const dH1Pre = dH1.slice();
+    for (let i = 0; i < dH1Pre.length; i++) {
+      if (h1Pre.data[i]! <= 0) dH1Pre[i] = 0;
     }
 
     const dW1 = zeros([INPUT_DIM, H]);
@@ -230,15 +264,17 @@ export class TinyMathMlp implements Model {
       for (let d = 0; d < INPUT_DIM; d++) {
         const xd = x.data[i * INPUT_DIM + d]!;
         for (let k = 0; k < H; k++) {
-          dW1.data[d * H + k]! += xd * dHPre[i * H + k]!;
+          dW1.data[d * H + k]! += xd * dH1Pre[i * H + k]!;
         }
       }
-      for (let k = 0; k < H; k++) db1.data[k]! += dHPre[i * H + k]!;
+      for (let k = 0; k < H; k++) db1.data[k]! += dH1Pre[i * H + k]!;
     }
 
     return new Map([
       ["W1", dW1],
       ["b1", db1],
+      ["W2", dW2],
+      ["b2", db2],
       ["Wh", dWh],
       ["bh", dbh],
       ["Wt", dWt],

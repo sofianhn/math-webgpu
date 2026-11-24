@@ -99,7 +99,7 @@
         <ul>
           <li><strong>Digit-wise answer head</strong>: predict hundreds / tens / ones, compose <code>100·H + 10·T + O</code>.</li>
           <li><strong>Fair expression holdout</strong>: freeze ~10% of expressions; every digit 0–9 still appears in train.</li>
-          <li><strong>Simple vs Ninja</strong> defaults (CPU sweeps): Simple ≈ H112 / 55 ep / 3k ex (~83% held-out). <strong>Ninja</strong> (page default) ≈ H256 / 150 ep / 10k ex (~90% held-out, ~83% hard probes).</li>
+          <li><strong>Simple vs Ninja</strong>: Ninja (default) uses mul/carry-weighted data, a deeper trunk, and tens-digit emphasis so hard products like <code>47 × 19</code> land — not just more epochs.</li>
         </ul>
 
         <h2>What to try</h2>
