@@ -1,9 +1,9 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  // Project site under https://<user>.github.io/math-webgpu/
-  base: "/math-webgpu/",
+  // Relative base works for GitHub Pages project sites and Cursor hosting root.
+  base: "./",
   root: ".",
-  server: { port: 5173, host: true },
-  preview: { port: 4173, host: true },
+  server: { port: 5173, host: "127.0.0.1" },
+  preview: { port: 4173, host: "127.0.0.1" },
 });
