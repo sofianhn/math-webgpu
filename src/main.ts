@@ -308,7 +308,8 @@ async function boot() {
           "ok",
         );
         progressEl.textContent = `Eval done · ${trainSummary}${holdSummary ? ` · ${holdSummary}` : ""}`;
-        logEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        // Keep the near-button status in view — do not scroll the log into focus.
+        evalStatusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setEvalStatus(`Eval failed: ${message}`, "error");
