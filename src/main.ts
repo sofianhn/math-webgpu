@@ -62,6 +62,7 @@ const paramCountEl = document.querySelector("#param-count")!;
 const tokenCountEl = document.querySelector("#token-count")!;
 const modeBlurbEl = document.querySelector("#mode-blurb")!;
 const ckptMetaEl = document.querySelector("#ckpt-meta")!;
+const evalStatusEl = document.querySelector<HTMLElement>("#eval-status")!;
 const epochsInput = document.querySelector<HTMLInputElement>("#epochs")!;
 const batchInput = document.querySelector<HTMLInputElement>("#batch")!;
 const examplesInput = document.querySelector<HTMLInputElement>("#examples")!;
@@ -258,180 +259,195 @@ async function boot() {
       }
     };
 
-    document.querySelectorAll<HTMLButtonElement>("[data-ckpt]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const key = btn.dataset.ckpt as ModeId;
-        applyMode(MODE_PRESETS[key]);
-        void loadSelected();
-      });
-    });
-    loadCkptBtn.addEventListener("click", () => void loadSelected());
+    const setEvalStatus = (text: string, kind: "" | "ok" | "error" = "") => {
+      evalStatusEl.textContent = text;
+      evalStatusEl.classList.toggle("is-ok", kind === "ok");
+      evalStatusEl.classList.toggle("is-error", kind === "error");
+    };
 
-    for (const el of [hiddenInput, batchInput, examplesInput, epochsInput, lrInput]) {
-      el.addEventListener("change", () => {
-        markCustom();
-        refreshCounts();
-      });
-    }
-
-    const previewFilter = (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b);
-    const previewPipe = new MathDataPipeline(
-      "pretrain",
-      new ArithmeticDataset({ filter: previewFilter, mix: NINJA_MIX, hardBias: 0.45 }),
-    );
-    renderDataFeed(
-      dataFeedEl,
-      previewPipe.nextBatch(6).texts ?? [],
-      "Preview of train-distribution rows (Ninja mix favors × / carries; fair held-out excluded):",
-    );
-
-    // Auto-load default Ninja checkpoint when present.
-    await loadSelected();
-
-    trainBtn.addEventListener("click", async () => {
+    const runEval = async () => {
+      if (!modelReady) {
+        setEvalStatus("Load a saved model (or finish Train New) before Run Eval.", "error");
+        log("Run Eval: no model loaded yet.");
+        return;
+      }
       setBusy(true);
+      setEvalStatus("Running eval…");
+      progressEl.textContent = "Running eval…";
+      await paint();
+      try {
+        let holdSummary = "";
+        // Frozen held-out first — that’s the metric users care about.
+        if (heldoutInput.checked) {
+          const held = await evaluateModel(model, batchFromExprs(holdExprs));
+          log(
+            `eval HOLD       loss=${held.loss.toFixed(4)}  ppl=${formatPpl(held.perplexity)}  acc=${(held.accuracy * 100).toFixed(1)}%  n=${held.n}`,
+          );
+          evalLineEl.textContent = `Live held-out: perplexity ${formatPpl(held.perplexity)} · acc ${(held.accuracy * 100).toFixed(1)}% on ${held.n} exprs`;
+          holdSummary = `hold-out ${(held.accuracy * 100).toFixed(1)}% (n=${held.n})`;
+          setEvalStatus(`Eval: ${holdSummary}…`, "ok");
+          progressEl.textContent = `Eval held-out ${(held.accuracy * 100).toFixed(1)}% · running train-dist…`;
+          await paint();
+        }
+
+        const pipeline = new MathDataPipeline(
+          "pretrain",
+          new ArithmeticDataset({
+            filter: heldoutInput.checked ? (a, b, op) => !isExpressionHeldOut(a, op, b) : undefined,
+            mix: NINJA_MIX,
+            hardBias: 0.45,
+          }),
+        );
+        const { loss, accuracy, perplexity } = await trainer.evaluate(model, pipeline, 8);
+        log(
+          `eval train-dist  loss=${loss.toFixed(4)}  ppl=${formatPpl(perplexity)}  acc=${(accuracy * 100).toFixed(1)}%`,
+        );
+        const trainSummary = `train-dist ${(accuracy * 100).toFixed(1)}% · ppl ${formatPpl(perplexity)}`;
+        setEvalStatus(
+          holdSummary ? `Eval done: ${holdSummary} · ${trainSummary}` : `Eval done: ${trainSummary}`,
+          "ok",
+        );
+        progressEl.textContent = `Eval done · ${trainSummary}${holdSummary ? ` · ${holdSummary}` : ""}`;
+        logEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setEvalStatus(`Eval failed: ${message}`, "error");
+        log(`Run Eval failed: ${message}`);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const runTrain = async () => {
+      setBusy(true);
+      setEvalStatus("");
       logEl.textContent = "";
       refreshCounts();
 
-      const epochs = Number(epochsInput.value);
-      const batchSize = Math.max(4, Number(batchInput.value) || 64);
-      const examples = Math.max(batchSize, Number(examplesInput.value) || 2560);
-      const stepsPerEpoch = Math.max(1, Math.round(examples / batchSize));
-      const learningRate = Number(lrInput.value);
-      const hidden = Math.max(16, Math.min(512, Number(hiddenInput.value) || DEFAULT_HIDDEN));
-      hiddenInput.value = String(hidden);
-      const useHeldout = heldoutInput.checked;
-      const modeLabel = activeMode;
+      try {
+        const epochs = Number(epochsInput.value);
+        const batchSize = Math.max(4, Number(batchInput.value) || 64);
+        const examples = Math.max(batchSize, Number(examplesInput.value) || 2560);
+        const stepsPerEpoch = Math.max(1, Math.round(examples / batchSize));
+        const learningRate = Number(lrInput.value);
+        const hidden = Math.max(16, Math.min(512, Number(hiddenInput.value) || DEFAULT_HIDDEN));
+        hiddenInput.value = String(hidden);
+        const useHeldout = heldoutInput.checked;
+        const modeLabel = activeMode;
 
-      const trainFilter = useHeldout
-        ? (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b)
-        : undefined;
-      const useNinjaMix = modeLabel === "ninja" || modeLabel === "mid" || modeLabel === "custom";
-      const hardBias =
-        modeLabel === "ninja"
-          ? MODE_PRESETS.ninja.hardBias
-          : modeLabel === "mid"
-            ? MODE_PRESETS.mid.hardBias
-            : modeLabel === "simple"
-              ? MODE_PRESETS.simple.hardBias
-              : 0.45;
-      const pipeline = new MathDataPipeline(
-        "pretrain",
-        new ArithmeticDataset({
-          filter: trainFilter,
-          mix: useNinjaMix
-            ? NINJA_MIX
-            : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
-          hardBias,
-        }),
-      );
-      const heldoutBatch = useHeldout ? batchFromExprs(holdExprs) : undefined;
-
-      model = new TinyMathMlp(gpu, hidden);
-      const beforeNorms = model.weightNorms();
-      history = [];
-      loadedCkpt = null;
-      modelReady = false;
-      renderCurves(curvesEl, history);
-      progressFill.style.width = "0%";
-      progressEl.textContent = `Starting ${modeLabel}… 0 / ${epochs}`;
-      evalLineEl.textContent = "";
-      ckptMetaEl.textContent = `Training new ${modeLabel} from scratch (not using saved weights).`;
-      const fb0 = gpu.cpuFallbackCount;
-
-      log(
-        `Train New [${modeLabel}] — digit heads · H=${hidden} (~${TinyMathMlp.paramCount(hidden).toLocaleString()} params) · ${examples}/epoch · ${stepsPerEpoch} steps × batch ${batchSize} · ~${(examples * TOKENS_PER_EXAMPLE).toLocaleString()} tokens/epoch · lr=${learningRate} · held-out=${useHeldout ? `fair ~${FAIR_HOLDOUT_PCT}%` : "off"}`,
-      );
-      if (modeLabel === "ninja") {
-        log("Ninja can take a few minutes on phones — that’s the strong-math setting.");
-      }
-      await paint();
-
-      await trainer.train(model, pipeline, {
-        stage: "pretrain",
-        epochs,
-        batchSize,
-        learningRate,
-        stepsPerEpoch,
-        tokensPerExample: TOKENS_PER_EXAMPLE,
-        heldoutBatch,
-        onMetrics: async (m) => {
-          history.push(m);
-          progressFill.style.width = `${((m.epoch / epochs) * 100).toFixed(1)}%`;
-          progressEl.textContent = `Epoch ${m.epoch}/${epochs} · train loss ${m.loss.toFixed(3)} · ppl ${formatPpl(m.perplexity)} · acc ${(m.accuracy * 100).toFixed(1)}% · ${m.tokens.toLocaleString()} tokens`;
-          let line = `epoch ${String(m.epoch).padStart(3)}  loss=${m.loss.toFixed(4)}  ppl=${formatPpl(m.perplexity)}  acc=${(m.accuracy * 100).toFixed(1)}%`;
-          if (m.heldout) {
-            line += `  |  HOLD loss=${m.heldout.loss.toFixed(4)}  ppl=${formatPpl(m.heldout.perplexity)}  acc=${(m.heldout.accuracy * 100).toFixed(1)}%`;
-            evalLineEl.textContent = `Held-out (unseen exprs): perplexity ${formatPpl(m.heldout.perplexity)} · acc ${(m.heldout.accuracy * 100).toFixed(1)}% on ${m.heldout.n} exprs`;
-          }
-          log(line);
-          renderCurves(curvesEl, history, {
-            title: `${modeLabel} · H=${hidden} · ${examples} ex/ep · lr=${learningRate}`,
-          });
-          const live = pipeline.nextBatch(6);
-          renderDataFeed(dataFeedEl, live.texts ?? [], `Live train sample @ epoch ${m.epoch}:`);
-          if (m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 5)) === 0) {
-            const score = await curriculumScore(model);
-            smartnessEl.textContent = `Curriculum @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
-              (score.ok / score.total) *
-              100
-            ).toFixed(0)}%)`;
-          }
-          await paint();
-        },
-      });
-
-      renderNormBars(normsEl, beforeNorms, model.weightNorms());
-      const score = await curriculumScore(model);
-      smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — compare held-out acc.`;
-      progressEl.textContent = `Done [${modeLabel}] · ${epochs} epochs · final train ppl ${formatPpl(history.at(-1)?.perplexity ?? NaN)}`;
-      progressFill.style.width = "100%";
-      modelReady = true;
-      const fb = gpu.cpuFallbackCount - fb0;
-      log(`Train New finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
-
-      const holdProbe =
-        holdExprs.find(([a, op, b]) => op === "+" && computeAnswer(a, op, b) < 1000) ?? holdExprs[0];
-      const probes: Array<readonly [number, Op, number]> = [
-        [12, "+", 34],
-        [47, "+", 38],
-        [17, "*", 19],
-        [47, "*", 19],
-        [25, "*", 25],
-        holdProbe ?? [58, "+", 67],
-      ];
-      for (const [a, op, b] of probes) {
-        const truth = computeAnswer(a, op, b);
-        const { answer } = await model.predict(encodeFeatures(a, op, b));
-        const tag = isExpressionHeldOut(a, op, b) ? "HOLD" : "probe";
-        log(`probe [${tag}] ${formatExpr(a, op, b)} → ${answer} (want ${truth})${answer === truth ? " ✓" : " ✗"}`);
-      }
-
-      setBusy(false);
-    });
-
-    evalBtn.addEventListener("click", async () => {
-      if (!modelReady) return;
-      setBusy(true);
-      const pipeline = new MathDataPipeline(
-        "pretrain",
-        new ArithmeticDataset({
-          filter: heldoutInput.checked ? (a, b, op) => !isExpressionHeldOut(a, op, b) : undefined,
-          mix: NINJA_MIX,
-          hardBias: 0.45,
-        }),
-      );
-      const { loss, accuracy, perplexity } = await trainer.evaluate(model, pipeline, 15);
-      log(`eval train-dist  loss=${loss.toFixed(4)}  ppl=${formatPpl(perplexity)}  acc=${(accuracy * 100).toFixed(1)}%`);
-      if (heldoutInput.checked) {
-        const held = await evaluateModel(model, batchFromExprs(holdExprs));
-        log(
-          `eval HOLD       loss=${held.loss.toFixed(4)}  ppl=${formatPpl(held.perplexity)}  acc=${(held.accuracy * 100).toFixed(1)}%  n=${held.n}`,
+        const trainFilter = useHeldout
+          ? (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b)
+          : undefined;
+        const useNinjaMix = modeLabel === "ninja" || modeLabel === "mid" || modeLabel === "custom";
+        const hardBias =
+          modeLabel === "ninja"
+            ? MODE_PRESETS.ninja.hardBias
+            : modeLabel === "mid"
+              ? MODE_PRESETS.mid.hardBias
+              : modeLabel === "simple"
+                ? MODE_PRESETS.simple.hardBias
+                : 0.45;
+        const pipeline = new MathDataPipeline(
+          "pretrain",
+          new ArithmeticDataset({
+            filter: trainFilter,
+            mix: useNinjaMix
+              ? NINJA_MIX
+              : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
+            hardBias,
+          }),
         );
-        evalLineEl.textContent = `Live held-out: perplexity ${formatPpl(held.perplexity)} · acc ${(held.accuracy * 100).toFixed(1)}% on ${held.n} exprs`;
+        const heldoutBatch = useHeldout ? batchFromExprs(holdExprs) : undefined;
+
+        model = new TinyMathMlp(gpu, hidden);
+        const beforeNorms = model.weightNorms();
+        history = [];
+        loadedCkpt = null;
+        modelReady = false;
+        renderCurves(curvesEl, history);
+        progressFill.style.width = "0%";
+        progressEl.textContent = `Starting ${modeLabel}… 0 / ${epochs}`;
+        evalLineEl.textContent = "";
+        ckptMetaEl.textContent = `Training new ${modeLabel} from scratch (not using saved weights).`;
+        const fb0 = gpu.cpuFallbackCount;
+
+        log(
+          `Train New [${modeLabel}] — digit heads · H=${hidden} (~${TinyMathMlp.paramCount(hidden).toLocaleString()} params) · ${examples}/epoch · ${stepsPerEpoch} steps × batch ${batchSize} · ~${(examples * TOKENS_PER_EXAMPLE).toLocaleString()} tokens/epoch · lr=${learningRate} · held-out=${useHeldout ? `fair ~${FAIR_HOLDOUT_PCT}%` : "off"}`,
+        );
+        if (modeLabel === "ninja") {
+          log("Ninja can take a few minutes on phones — that’s the strong-math setting.");
+        }
+        await paint();
+
+        await trainer.train(model, pipeline, {
+          stage: "pretrain",
+          epochs,
+          batchSize,
+          learningRate,
+          stepsPerEpoch,
+          tokensPerExample: TOKENS_PER_EXAMPLE,
+          heldoutBatch,
+          onMetrics: async (m) => {
+            history.push(m);
+            progressFill.style.width = `${((m.epoch / epochs) * 100).toFixed(1)}%`;
+            progressEl.textContent = `Epoch ${m.epoch}/${epochs} · train loss ${m.loss.toFixed(3)} · ppl ${formatPpl(m.perplexity)} · acc ${(m.accuracy * 100).toFixed(1)}% · ${m.tokens.toLocaleString()} tokens`;
+            let line = `epoch ${String(m.epoch).padStart(3)}  loss=${m.loss.toFixed(4)}  ppl=${formatPpl(m.perplexity)}  acc=${(m.accuracy * 100).toFixed(1)}%`;
+            if (m.heldout) {
+              line += `  |  HOLD loss=${m.heldout.loss.toFixed(4)}  ppl=${formatPpl(m.heldout.perplexity)}  acc=${(m.heldout.accuracy * 100).toFixed(1)}%`;
+              evalLineEl.textContent = `Held-out (unseen exprs): perplexity ${formatPpl(m.heldout.perplexity)} · acc ${(m.heldout.accuracy * 100).toFixed(1)}% on ${m.heldout.n} exprs`;
+            }
+            log(line);
+            renderCurves(curvesEl, history, {
+              title: `${modeLabel} · H=${hidden} · ${examples} ex/ep · lr=${learningRate}`,
+            });
+            const live = pipeline.nextBatch(6);
+            renderDataFeed(dataFeedEl, live.texts ?? [], `Live train sample @ epoch ${m.epoch}:`);
+            if (m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 5)) === 0) {
+              const score = await curriculumScore(model);
+              smartnessEl.textContent = `Curriculum @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
+                (score.ok / score.total) *
+                100
+              ).toFixed(0)}%)`;
+            }
+            await paint();
+          },
+        });
+
+        renderNormBars(normsEl, beforeNorms, model.weightNorms());
+        const score = await curriculumScore(model);
+        smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — compare held-out acc.`;
+        progressEl.textContent = `Done [${modeLabel}] · ${epochs} epochs · final train ppl ${formatPpl(history.at(-1)?.perplexity ?? NaN)}`;
+        progressFill.style.width = "100%";
+        modelReady = true;
+        const fb = gpu.cpuFallbackCount - fb0;
+        log(`Train New finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
+
+        const holdProbe =
+          holdExprs.find(([a, op, b]) => op === "+" && computeAnswer(a, op, b) < 1000) ?? holdExprs[0];
+        const probes: Array<readonly [number, Op, number]> = [
+          [12, "+", 34],
+          [47, "+", 38],
+          [17, "*", 19],
+          [47, "*", 19],
+          [25, "*", 25],
+          holdProbe ?? [58, "+", 67],
+        ];
+        for (const [a, op, b] of probes) {
+          const truth = computeAnswer(a, op, b);
+          const { answer } = await model.predict(encodeFeatures(a, op, b));
+          const tag = isExpressionHeldOut(a, op, b) ? "HOLD" : "probe";
+          log(`probe [${tag}] ${formatExpr(a, op, b)} → ${answer} (want ${truth})${answer === truth ? " ✓" : " ✗"}`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`Train New failed: ${message}`);
+        setEvalStatus(`Train failed: ${message}`, "error");
+        // Keep whatever weights exist if training aborted mid-run.
+        modelReady = history.length > 0;
+      } finally {
+        setBusy(false);
       }
-      setBusy(false);
-    });
+    };
 
     const runPredict = async () => {
       if (!modelReady) {
@@ -466,9 +482,31 @@ async function boot() {
       renderTopK(topkEl, probs, 5);
     };
 
+    // Wire controls before auto-load so Run Eval / Train New never sit enabled without handlers.
+    document.querySelectorAll<HTMLButtonElement>("[data-ckpt]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.dataset.ckpt as ModeId;
+        applyMode(MODE_PRESETS[key]);
+        setEvalStatus("");
+        void loadSelected();
+      });
+    });
+    loadCkptBtn.addEventListener("click", () => {
+      setEvalStatus("");
+      void loadSelected();
+    });
+    trainBtn.addEventListener("click", () => void runTrain());
+    evalBtn.addEventListener("click", () => void runEval());
     predictBtn.addEventListener("click", () => void runPredict());
     aInput.addEventListener("change", () => void runPredict());
     bInput.addEventListener("change", () => void runPredict());
+
+    for (const el of [hiddenInput, batchInput, examplesInput, epochsInput, lrInput]) {
+      el.addEventListener("change", () => {
+        markCustom();
+        refreshCounts();
+      });
+    }
 
     posttrainBtn.addEventListener("click", () => {
       log(`Post-train stub: ${describePostTrain("digit-rl")}`);
@@ -476,8 +514,21 @@ async function boot() {
         log(err instanceof Error ? err.message : String(err));
       });
     });
-    // Keep disabled — stub only — but allow a click via title; enable for discoverability:
     posttrainBtn.disabled = false;
+
+    const previewFilter = (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b);
+    const previewPipe = new MathDataPipeline(
+      "pretrain",
+      new ArithmeticDataset({ filter: previewFilter, mix: NINJA_MIX, hardBias: 0.45 }),
+    );
+    renderDataFeed(
+      dataFeedEl,
+      previewPipe.nextBatch(6).texts ?? [],
+      "Preview of train-distribution rows (Ninja mix favors × / carries; fair held-out excluded):",
+    );
+
+    // Auto-load default Ninja checkpoint when present (handlers already wired).
+    await loadSelected();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     statusEl.innerHTML = `<p><strong>WebGPU failed.</strong> ${message}</p>`;
