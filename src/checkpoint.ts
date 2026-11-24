@@ -22,6 +22,18 @@ export type CheckpointHyperparams = {
   heldout: boolean;
 };
 
+/** Optional digit-RL post-train summary attached to a saved checkpoint. */
+export type CheckpointPostTrain = {
+  kind: "digit-rl";
+  steps: number;
+  meanReward: number;
+  beforeHoldout: EvalSliceMetrics;
+  afterHoldout: EvalSliceMetrics;
+  holdoutDelta: number;
+  /** Base pretrained checkpoint id, if any. */
+  baseId?: CheckpointId | string;
+};
+
 export type CheckpointMeta = {
   version: typeof CHECKPOINT_VERSION;
   id: CheckpointId;
@@ -51,6 +63,8 @@ export type CheckpointMeta = {
     hard: number;
     curriculum: number;
   };
+  /** Present when weights were updated by browser digit RL. */
+  postTrain?: CheckpointPostTrain;
 };
 
 export type CheckpointFile = CheckpointMeta & {
@@ -193,4 +207,21 @@ export async function fetchManifest(): Promise<CheckpointManifest | null> {
   } catch {
     return null;
   }
+}
+
+/** Trigger a browser download of a checkpoint JSON (post-RL save). */
+export function downloadCheckpoint(ckpt: CheckpointFile, filename?: string): void {
+  const name =
+    filename ??
+    `${ckpt.id}${ckpt.postTrain ? `-${ckpt.postTrain.kind}` : ""}-checkpoint.json`;
+  const blob = new Blob([JSON.stringify(ckpt)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
