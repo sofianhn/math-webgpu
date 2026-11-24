@@ -231,8 +231,42 @@ label.check input {
   margin-bottom: 0.5rem;
 }
 
+.action-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.action-row button {
+  flex: 1;
+  min-width: 6.5rem;
+}
+
+.ckpt-meta {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--accent);
+  line-height: 1.4;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+.posttrain-note {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.posttrain-note[hidden] {
+  display: none;
+}
+
 #train,
-#eval {
+#eval,
+#load-ckpt {
   grid-column: span 1;
 }
 

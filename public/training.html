@@ -102,11 +102,29 @@
           <li><strong>Simple vs Ninja</strong>: Ninja (default) uses mul/carry-weighted data, a deeper trunk, and tens-digit emphasis so hard products like <code>47 × 19</code> land — not just more epochs.</li>
         </ul>
 
+        <h2>Saved checkpoints</h2>
+        <p>
+          The demo ships pretrained <strong>Simple / Mid / Ninja</strong> files under
+          <code>checkpoints/</code>: weights, hyperparams, and per-epoch train + frozen held-out
+          curves. Pick a saved model for instant graphs, then <strong>Run Eval</strong> or
+          <strong>Train New</strong> from scratch (slow).
+        </p>
+
+        <h2>Post-training without English</h2>
+        <p>
+          There is no language channel, so verbal chain-of-thought cannot be learned here.
+          Useful post-train signals stay numeric:
+          <strong>digit RL / correctness reward</strong>,
+          <strong>DPO-style preference on answer digits</strong>, and
+          <strong>self-consistency</strong> (majority vote over digit heads).
+          See <code>src/posttrain.ts</code> for a stub hook — not overbuilt into Train yet.
+        </p>
+
         <h2>What to try</h2>
         <ol>
-          <li>Leave <strong>Ninja</strong> on, hit Train, wait for held-out toward ~90%.</li>
+          <li>Leave <strong>Ninja</strong> on (auto-loads saved weights), inspect the held-out curve, hit <strong>Run Eval</strong>.</li>
           <li>Probe <code>47 + 38</code>, <code>17 × 19</code>, <code>25 × 25</code>, plus a held-out bank row.</li>
-          <li>Switch to <strong>Simple</strong> for a faster ~80% held-out pass.</li>
+          <li>Switch to <strong>Simple</strong> or <strong>Mid</strong> for other saved runs.</li>
           <li>Try <code>100 + 3</code> (OOD) — still no hundreds <em>input</em> place.</li>
         </ol>
         <p>

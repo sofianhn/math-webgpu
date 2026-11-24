@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "simple",
+      "label": "Simple",
+      "blurb": "Faster train · lighter mul mix · solid everyday arithmetic",
+      "path": "checkpoints/simple.json",
+      "hidden": 128,
+      "epochs": 60,
+      "paramCount": 26142,
+      "finalHoldoutAcc": 0.88
+    },
+    {
+      "id": "mid",
+      "label": "Mid",
+      "blurb": "Middle ground · H192 · more mul bias than Simple, shorter than Ninja",
+      "path": "checkpoints/mid.json",
+      "hidden": 192,
+      "epochs": 100,
+      "paramCount": 51486,
+      "finalHoldoutAcc": 0.905
+    },
+    {
+      "id": "ninja",
+      "label": "Ninja",
+      "blurb": "Default · mul/carry-weighted data, deeper trunk, H288 — tuned so hard products like 47×19 land",
+      "path": "checkpoints/ninja.json",
+      "hidden": 288,
+      "epochs": 160,
+      "paramCount": 104862,
+      "finalHoldoutAcc": 0.945
+    }
+  ]
+}

@@ -25,7 +25,15 @@ import {
   evaluateModel,
   isExpressionHeldOut,
 } from "./evals";
-import { DEFAULT_MODE, MODE_PRESETS, type ModePreset } from "./presets";
+import { DEFAULT_MODE, MODE_PRESETS, type ModeId, type ModePreset } from "./presets";
+import {
+  fetchCheckpoint,
+  fetchManifest,
+  loadWeights,
+  type CheckpointFile,
+  type CheckpointId,
+} from "./checkpoint";
+import { describePostTrain, runPostTrain } from "./posttrain";
 
 const statusEl = document.querySelector("#status")!;
 const controlsEl = document.querySelector<HTMLElement>("#controls")!;
@@ -35,9 +43,12 @@ const holdFeedEl = document.querySelector<HTMLElement>("#hold-feed")!;
 const internalsEl = document.querySelector<HTMLElement>("#internals")!;
 const logEl = document.querySelector("#log")!;
 const probeEl = document.querySelector<HTMLElement>("#probe")!;
+const posttrainEl = document.querySelector<HTMLElement>("#posttrain-note")!;
 const trainBtn = document.querySelector<HTMLButtonElement>("#train")!;
 const evalBtn = document.querySelector<HTMLButtonElement>("#eval")!;
+const loadCkptBtn = document.querySelector<HTMLButtonElement>("#load-ckpt")!;
 const predictBtn = document.querySelector<HTMLButtonElement>("#predict")!;
+const posttrainBtn = document.querySelector<HTMLButtonElement>("#posttrain-stub")!;
 const predictionEl = document.querySelector("#prediction")!;
 const oodEl = document.querySelector<HTMLElement>("#ood")!;
 const curvesEl = document.querySelector<SVGSVGElement>("#curves")!;
@@ -50,6 +61,7 @@ const progressFill = document.querySelector<HTMLElement>("#progress-fill")!;
 const paramCountEl = document.querySelector("#param-count")!;
 const tokenCountEl = document.querySelector("#token-count")!;
 const modeBlurbEl = document.querySelector("#mode-blurb")!;
+const ckptMetaEl = document.querySelector("#ckpt-meta")!;
 const epochsInput = document.querySelector<HTMLInputElement>("#epochs")!;
 const batchInput = document.querySelector<HTMLInputElement>("#batch")!;
 const examplesInput = document.querySelector<HTMLInputElement>("#examples")!;
@@ -59,7 +71,9 @@ const heldoutInput = document.querySelector<HTMLInputElement>("#heldout")!;
 const aInput = document.querySelector<HTMLInputElement>("#a")!;
 const bInput = document.querySelector<HTMLInputElement>("#b")!;
 
-let activeMode: "simple" | "ninja" | "custom" = DEFAULT_MODE;
+let activeMode: ModeId | "custom" = DEFAULT_MODE;
+let loadedCkpt: CheckpointFile | null = null;
+let modelReady = false;
 
 function paint(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -85,18 +99,19 @@ function applyMode(mode: ModePreset) {
   examplesInput.value = String(mode.examples);
   batchInput.value = String(mode.batch);
   modeBlurbEl.textContent = mode.blurb;
-  document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.mode === mode.id);
+  document.querySelectorAll<HTMLButtonElement>("[data-ckpt]").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.ckpt === mode.id);
   });
   refreshCounts();
 }
 
 function markCustom() {
   activeMode = "custom";
-  document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((btn) => {
+  document.querySelectorAll<HTMLButtonElement>("[data-ckpt]").forEach((btn) => {
     btn.classList.remove("is-active");
   });
-  modeBlurbEl.textContent = "Custom knobs — not a Simple/Ninja preset.";
+  modeBlurbEl.textContent = "Custom knobs — not a saved Simple/Mid/Ninja model.";
+  ckptMetaEl.textContent = "";
 }
 
 function refreshCounts() {
@@ -113,6 +128,15 @@ function refreshCounts() {
   tokenCountEl.textContent = `Tokens / epoch ≈ ${tokens.toLocaleString()}  (${examples.toLocaleString()} examples × ${TOKENS_PER_EXAMPLE} · ${steps} steps × batch ${batch})`;
 }
 
+function paintCkptMeta(ckpt: CheckpointFile) {
+  const h = ckpt.hyperparams;
+  const hold = ckpt.finalHoldout;
+  const probes = ckpt.probes
+    ? ` · probes easy ${(ckpt.probes.easy * 100).toFixed(0)}% / hard ${(ckpt.probes.hard * 100).toFixed(0)}% / curr ${(ckpt.probes.curriculum * 100).toFixed(0)}%`
+    : "";
+  ckptMetaEl.textContent = `Loaded ${ckpt.label}: H=${h.hidden} · ${h.epochs} ep · lr=${h.lr} · ${h.examples.toLocaleString()} ex/ep · batch ${h.batch} · final hold-out ${(hold.accuracy * 100).toFixed(1)}% (n=${hold.n})${probes}`;
+}
+
 async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total: number }> {
   let ok = 0;
   for (const [a, op, b] of CURRICULUM) {
@@ -127,11 +151,12 @@ async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total:
 async function boot() {
   try {
     const gpu = await WebGpuBackend.create();
-    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Default mode = <strong>Ninja</strong> (empirically tuned for hard arithmetic). Domain <strong>0–${MAX_OPERAND}</strong>.</p>`;
+    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Load a <strong>saved</strong> Simple / Mid / Ninja model for instant curves, or Train New. Domain <strong>0–${MAX_OPERAND}</strong>.</p>`;
     controlsEl.hidden = false;
     dataEl.hidden = false;
     internalsEl.hidden = false;
     probeEl.hidden = false;
+    posttrainEl.hidden = false;
     renderCurves(curvesEl, []);
     applyMode(MODE_PRESETS[DEFAULT_MODE]);
 
@@ -148,6 +173,7 @@ async function boot() {
     let model = new TinyMathMlp(gpu, MODE_PRESETS.ninja.hidden);
     const trainer = new MathTrainer();
     let history: TrainMetrics[] = [];
+    const beforeNormsByHidden = new Map<number, ReturnType<TinyMathMlp["weightNorms"]>>();
 
     const smoke = await gpu.matmul(
       new Float32Array([1, 2, 3, 4]),
@@ -162,16 +188,86 @@ async function boot() {
         ? "GPU matmul smoke-test passed (2×2)."
         : `GPU matmul mismatch: ${Array.from(smoke)}`,
     );
-    log(
-      `Defaults: Simple H=${MODE_PRESETS.simple.hidden}/ep${MODE_PRESETS.simple.epochs}/ex${MODE_PRESETS.simple.examples} · Ninja H=${MODE_PRESETS.ninja.hidden}/ep${MODE_PRESETS.ninja.epochs}/ex${MODE_PRESETS.ninja.examples} lr=${MODE_PRESETS.ninja.lr}`,
-    );
 
-    document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((btn) => {
+    const manifest = await fetchManifest();
+    if (manifest?.models.length) {
+      const bits = manifest.models
+        .map((m) => `${m.label} hold=${(m.finalHoldoutAcc * 100).toFixed(0)}%`)
+        .join(" · ");
+      log(`Checkpoints available: ${bits}`);
+    } else {
+      log("No checkpoint manifest found — Train New still works; Load saved needs public/checkpoints/.");
+    }
+
+    const setBusy = (busy: boolean) => {
+      trainBtn.disabled = busy;
+      evalBtn.disabled = busy || !modelReady;
+      loadCkptBtn.disabled = busy;
+      predictBtn.disabled = busy || !modelReady;
+    };
+
+    const applyCheckpoint = async (ckpt: CheckpointFile, opts?: { silent?: boolean }) => {
+      const hp = ckpt.hyperparams;
+      applyMode({
+        id: ckpt.id,
+        label: ckpt.label,
+        blurb: ckpt.blurb,
+        hidden: hp.hidden,
+        epochs: hp.epochs,
+        lr: hp.lr,
+        examples: hp.examples,
+        batch: hp.batch,
+        mix: hp.mix,
+        hardBias: hp.hardBias,
+      });
+      model = new TinyMathMlp(gpu, hp.hidden);
+      loadWeights(model, ckpt.weights.params);
+      loadedCkpt = ckpt;
+      history = ckpt.curves.slice();
+      modelReady = true;
+      paintCkptMeta(ckpt);
+      renderCurves(curvesEl, history, {
+        title: `${ckpt.label} (saved) · H=${hp.hidden} · hold ${(ckpt.finalHoldout.accuracy * 100).toFixed(0)}%`,
+      });
+      progressFill.style.width = "100%";
+      progressEl.textContent = `Loaded ${ckpt.label} · ${ckpt.curves.length} epochs of curves · hold-out ${(ckpt.finalHoldout.accuracy * 100).toFixed(1)}%`;
+      evalLineEl.textContent = `Saved held-out: perplexity ${formatPpl(ckpt.finalHoldout.perplexity)} · acc ${(ckpt.finalHoldout.accuracy * 100).toFixed(1)}% on ${ckpt.finalHoldout.n} exprs`;
+      const score = await curriculumScore(model);
+      smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — from saved ${ckpt.label}`;
+      normsEl.innerHTML = `<p class="norm-intro">Loaded ${ckpt.arch.paramCount.toLocaleString()} parameters from checkpoint (train from scratch to see before→after norm bars).</p>`;
+      if (!opts?.silent) {
+        log(
+          `Loaded checkpoint ${ckpt.id} (${ckpt.arch.paramCount.toLocaleString()} params, ${ckpt.curves.length} epoch curves).`,
+        );
+      }
+      evalBtn.disabled = false;
+      predictBtn.disabled = false;
+    };
+
+    const loadSelected = async () => {
+      const id = (activeMode === "custom" ? DEFAULT_MODE : activeMode) as CheckpointId;
+      setBusy(true);
+      try {
+        const ckpt = await fetchCheckpoint(id);
+        await applyCheckpoint(ckpt);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`Load failed: ${message}`);
+        ckptMetaEl.textContent = `Could not load ${id}: ${message}`;
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    document.querySelectorAll<HTMLButtonElement>("[data-ckpt]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const key = btn.dataset.mode as "simple" | "ninja";
+        const key = btn.dataset.ckpt as ModeId;
         applyMode(MODE_PRESETS[key]);
+        void loadSelected();
       });
     });
+    loadCkptBtn.addEventListener("click", () => void loadSelected());
+
     for (const el of [hiddenInput, batchInput, examplesInput, epochsInput, lrInput]) {
       el.addEventListener("change", () => {
         markCustom();
@@ -190,10 +286,11 @@ async function boot() {
       "Preview of train-distribution rows (Ninja mix favors × / carries; fair held-out excluded):",
     );
 
+    // Auto-load default Ninja checkpoint when present.
+    await loadSelected();
+
     trainBtn.addEventListener("click", async () => {
-      trainBtn.disabled = true;
-      evalBtn.disabled = true;
-      predictBtn.disabled = true;
+      setBusy(true);
       logEl.textContent = "";
       refreshCounts();
 
@@ -210,29 +307,42 @@ async function boot() {
       const trainFilter = useHeldout
         ? (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b)
         : undefined;
-      // Ninja (and default page mode) overweight mul/carry; Simple stays lighter but still mul-aware.
-      const useNinjaMix = modeLabel === "ninja" || modeLabel === "custom";
+      const useNinjaMix = modeLabel === "ninja" || modeLabel === "mid" || modeLabel === "custom";
+      const hardBias =
+        modeLabel === "ninja"
+          ? MODE_PRESETS.ninja.hardBias
+          : modeLabel === "mid"
+            ? MODE_PRESETS.mid.hardBias
+            : modeLabel === "simple"
+              ? MODE_PRESETS.simple.hardBias
+              : 0.45;
       const pipeline = new MathDataPipeline(
         "pretrain",
         new ArithmeticDataset({
           filter: trainFilter,
-          mix: useNinjaMix ? NINJA_MIX : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
-          hardBias: useNinjaMix ? 0.5 : 0.25,
+          mix: useNinjaMix
+            ? NINJA_MIX
+            : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
+          hardBias,
         }),
       );
       const heldoutBatch = useHeldout ? batchFromExprs(holdExprs) : undefined;
 
       model = new TinyMathMlp(gpu, hidden);
       const beforeNorms = model.weightNorms();
+      beforeNormsByHidden.set(hidden, beforeNorms);
       history = [];
+      loadedCkpt = null;
+      modelReady = false;
       renderCurves(curvesEl, history);
       progressFill.style.width = "0%";
       progressEl.textContent = `Starting ${modeLabel}… 0 / ${epochs}`;
       evalLineEl.textContent = "";
+      ckptMetaEl.textContent = `Training new ${modeLabel} from scratch (not using saved weights).`;
       const fb0 = gpu.cpuFallbackCount;
 
       log(
-        `Pretrain [${modeLabel}] — digit heads · H=${hidden} (~${TinyMathMlp.paramCount(hidden).toLocaleString()} params) · ${examples}/epoch · ${stepsPerEpoch} steps × batch ${batchSize} · ~${(examples * TOKENS_PER_EXAMPLE).toLocaleString()} tokens/epoch · lr=${learningRate} · held-out=${useHeldout ? `fair ~${FAIR_HOLDOUT_PCT}%` : "off"}`,
+        `Train New [${modeLabel}] — digit heads · H=${hidden} (~${TinyMathMlp.paramCount(hidden).toLocaleString()} params) · ${examples}/epoch · ${stepsPerEpoch} steps × batch ${batchSize} · ~${(examples * TOKENS_PER_EXAMPLE).toLocaleString()} tokens/epoch · lr=${learningRate} · held-out=${useHeldout ? `fair ~${FAIR_HOLDOUT_PCT}%` : "off"}`,
       );
       if (modeLabel === "ninja") {
         log("Ninja can take a few minutes on phones — that’s the strong-math setting.");
@@ -275,11 +385,12 @@ async function boot() {
 
       renderNormBars(normsEl, beforeNorms, model.weightNorms());
       const score = await curriculumScore(model);
-      smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — Ninja targets hard mul/carry; compare held-out acc.`;
+      smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — compare held-out acc.`;
       progressEl.textContent = `Done [${modeLabel}] · ${epochs} epochs · final train ppl ${formatPpl(history.at(-1)?.perplexity ?? NaN)}`;
       progressFill.style.width = "100%";
+      modelReady = true;
       const fb = gpu.cpuFallbackCount - fb0;
-      log(`Pretrain finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
+      log(`Train New finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
 
       const holdProbe =
         holdExprs.find(([a, op, b]) => op === "+" && computeAnswer(a, op, b) < 1000) ?? holdExprs[0];
@@ -298,13 +409,12 @@ async function boot() {
         log(`probe [${tag}] ${formatExpr(a, op, b)} → ${answer} (want ${truth})${answer === truth ? " ✓" : " ✗"}`);
       }
 
-      trainBtn.disabled = false;
-      evalBtn.disabled = false;
-      predictBtn.disabled = false;
+      setBusy(false);
     });
 
     evalBtn.addEventListener("click", async () => {
-      evalBtn.disabled = true;
+      if (!modelReady) return;
+      setBusy(true);
       const pipeline = new MathDataPipeline(
         "pretrain",
         new ArithmeticDataset({
@@ -320,11 +430,16 @@ async function boot() {
         log(
           `eval HOLD       loss=${held.loss.toFixed(4)}  ppl=${formatPpl(held.perplexity)}  acc=${(held.accuracy * 100).toFixed(1)}%  n=${held.n}`,
         );
+        evalLineEl.textContent = `Live held-out: perplexity ${formatPpl(held.perplexity)} · acc ${(held.accuracy * 100).toFixed(1)}% on ${held.n} exprs`;
       }
-      evalBtn.disabled = false;
+      setBusy(false);
     });
 
     const runPredict = async () => {
+      if (!modelReady) {
+        predictionEl.textContent = "Load a saved model or Train New first.";
+        return;
+      }
       const a = Number(aInput.value);
       const b = Number(bInput.value);
       const op = (document.querySelector("#op") as HTMLSelectElement).value as Op;
@@ -356,6 +471,15 @@ async function boot() {
     predictBtn.addEventListener("click", () => void runPredict());
     aInput.addEventListener("change", () => void runPredict());
     bInput.addEventListener("change", () => void runPredict());
+
+    posttrainBtn.addEventListener("click", () => {
+      log(`Post-train stub: ${describePostTrain("digit-rl")}`);
+      void runPostTrain(model, { kind: "digit-rl" }).catch((err) => {
+        log(err instanceof Error ? err.message : String(err));
+      });
+    });
+    // Keep disabled — stub only — but allow a click via title; enable for discoverability:
+    posttrainBtn.disabled = false;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     statusEl.innerHTML = `<p><strong>WebGPU failed.</strong> ${message}</p>`;
