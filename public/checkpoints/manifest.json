@@ -11,6 +11,17 @@
       "paramCount": 159412,
       "finalHoldoutAcc": 0.90625,
       "curriculumEnd": 4
+    },
+    {
+      "id": "mid",
+      "label": "Mid",
+      "blurb": "Curriculum to 7 digits + Digit RL. Hold-out 94.5% \u2192 97.7% (+3.1 pp).",
+      "path": "checkpoints/mid.json",
+      "hidden": 384,
+      "epochs": 280,
+      "paramCount": 288180,
+      "finalHoldoutAcc": 0.9765625,
+      "curriculumEnd": 7
     }
   ]
 }
