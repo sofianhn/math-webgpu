@@ -7,8 +7,8 @@ import type {
   TrainingStage,
 } from "./types";
 import { digitAccuracy, digitCrossEntropy } from "./tensor";
-import { evaluateModel } from "./evals";
-import { OPERAND_DIGITS, TOKENS_PER_EXAMPLE } from "./data";
+import { batchFromExprs, evaluateModel, type HoldoutExpr } from "./evals";
+import { OPERAND_DIGITS, TOKENS_PER_EXAMPLE, digitLength } from "./data";
 
 const DEFAULT_STAGES: Record<TrainingStage, true> = {
   pretrain: true,
@@ -67,15 +67,22 @@ export class MathTrainer implements Trainer {
 
         const loss = config.strategy?.loss
           ? config.strategy.loss(logits, batch.digitTargets, B)
-          : digitCrossEntropy(logits.data, B, places, batch.digitTargets);
+          : digitCrossEntropy(logits.data, B, places, batch.digitTargets, 10, batch.activeCounts);
 
-        const acc = digitAccuracy(logits.data, B, places, batch.digitTargets);
+        const acc = digitAccuracy(
+          logits.data,
+          B,
+          places,
+          batch.digitTargets,
+          10,
+          batch.activeCounts,
+        );
         exactSum += acc.exact * B;
         digitSum += acc.digit * B;
         total += B;
         lossSum += loss;
 
-        const grads = model.backward(cache, batch.digitTargets);
+        const grads = model.backward(cache, batch.digitTargets, batch.activeCounts);
         t += 1;
         const lrT = (config.learningRate * Math.sqrt(1 - beta2 ** t)) / (1 - beta1 ** t);
         for (const { name, tensor: param } of model.parameters()) {
@@ -109,9 +116,14 @@ export class MathTrainer implements Trainer {
         maxDigits,
       };
 
-      if (config.heldoutBatch && config.heldoutBatch.digitTargets.length > 0) {
-        const held = await evaluateModel(model, config.heldoutBatch);
-        metrics.heldout = held;
+      if (config.heldoutExprs && config.heldoutExprs.length > 0) {
+        const matched = (config.heldoutExprs as HoldoutExpr[]).filter(
+          ([a, , b]) => digitLength(a) <= maxDigits && digitLength(b) <= maxDigits,
+        );
+        const slice = matched.length > 0 ? matched.slice(0, 160) : (config.heldoutExprs as HoldoutExpr[]).slice(0, 160);
+        metrics.heldout = await evaluateModel(model, batchFromExprs(slice));
+      } else if (config.heldoutBatch && config.heldoutBatch.digitTargets.length > 0) {
+        metrics.heldout = await evaluateModel(model, config.heldoutBatch);
       }
 
       history.push(metrics);
@@ -138,8 +150,8 @@ export class MathTrainer implements Trainer {
       const batch = pipeline.nextBatch(batchSize);
       const { logits } = await model.forward(batch.inputs);
       const [B] = logits.shape;
-      lossSum += digitCrossEntropy(logits.data, B, places, batch.digitTargets);
-      const acc = digitAccuracy(logits.data, B, places, batch.digitTargets);
+      lossSum += digitCrossEntropy(logits.data, B, places, batch.digitTargets, 10, batch.activeCounts);
+      const acc = digitAccuracy(logits.data, B, places, batch.digitTargets, 10, batch.activeCounts);
       exactSum += acc.exact * B;
       digitSum += acc.digit * B;
       total += B;

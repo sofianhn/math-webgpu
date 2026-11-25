@@ -1,1 +1,16 @@
-{"version":2,"models":[]}
+{
+  "version": 2,
+  "models": [
+    {
+      "id": "simple",
+      "label": "Simple",
+      "blurb": "Faster train · curriculum to 4 digits · lighter mul mix",
+      "path": "checkpoints/simple.json",
+      "hidden": 256,
+      "epochs": 12,
+      "paramCount": 116618,
+      "finalHoldoutAcc": 0.01171875,
+      "curriculumEnd": 4
+    }
+  ]
+}

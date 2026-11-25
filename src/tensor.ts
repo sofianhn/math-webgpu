@@ -111,9 +111,23 @@ export function argmaxRow(probs: Float32Array, rows: number, cols: number): Int3
 }
 
 /**
- * Mean cross-entropy over digit-place rows.
- * `logits` is [batch * places, 10] flattened as [batch, places * 10].
- * `digitTargets` is [batch * places] with values 0–9.
+ * Active place count for an LSD-first digit row: highest non-zero index + 2
+ * (include the next zero boundary), at least 1, at most `places`.
+ */
+export function activePlaceCount(digitRow: ArrayLike<number>, places: number): number {
+  let hi = 0;
+  for (let p = places - 1; p >= 0; p--) {
+    if (digitRow[p]) {
+      hi = p;
+      break;
+    }
+  }
+  return Math.min(places, Math.max(1, hi + 2));
+}
+
+/**
+ * Mean cross-entropy over active digit places.
+ * `activeCounts[i]` (optional) overrides the heuristic place count.
  */
 export function digitCrossEntropy(
   logits: Float32Array,
@@ -121,44 +135,64 @@ export function digitCrossEntropy(
   places: number,
   digitTargets: Uint8Array,
   classes = 10,
+  activeCounts?: Uint8Array,
 ): number {
   const rows = batch * places;
   if (digitTargets.length !== rows) {
     throw new Error(`digitTargets ${digitTargets.length} != ${rows}`);
   }
   let loss = 0;
-  for (let r = 0; r < rows; r++) {
-    const off = r * classes;
-    let max = -Infinity;
-    for (let c = 0; c < classes; c++) max = Math.max(max, logits[off + c]!);
-    let sum = 0;
-    for (let c = 0; c < classes; c++) sum += Math.exp(logits[off + c]! - max);
-    const t = digitTargets[r]!;
-    loss += -(logits[off + t]! - max - Math.log(sum));
+  let weightSum = 0;
+  for (let i = 0; i < batch; i++) {
+    const active = activeCounts
+      ? Math.min(places, Math.max(1, activeCounts[i]!))
+      : activePlaceCount(digitTargets.subarray(i * places, (i + 1) * places), places);
+    const sig = activePlaceCount(digitTargets.subarray(i * places, (i + 1) * places), places);
+    for (let p = 0; p < active; p++) {
+      const r = i * places + p;
+      const off = r * classes;
+      let max = -Infinity;
+      for (let c = 0; c < classes; c++) max = Math.max(max, logits[off + c]!);
+      let sum = 0;
+      for (let c = 0; c < classes; c++) sum += Math.exp(logits[off + c]! - max);
+      const t = digitTargets[r]!;
+      // Significant + near places dominate; far trailing zeros still get a nudge.
+      const w = p < sig ? 1.2 : p < sig + 2 ? 0.6 : 0.2;
+      loss += w * -(logits[off + t]! - max - Math.log(sum));
+      weightSum += w;
+    }
   }
-  return loss / rows;
+  return weightSum === 0 ? 0 : loss / weightSum;
 }
 
-/** Exact-match + mean digit accuracy from digit logits vs targets. */
+/** Exact-match + mean digit accuracy (digit avg over active places only). */
 export function digitAccuracy(
   logits: Float32Array,
   batch: number,
   places: number,
   digitTargets: Uint8Array,
   classes = 10,
+  activeCounts?: Uint8Array,
 ): { exact: number; digit: number } {
   const probs = softmaxRows(logits, batch * places, classes);
   const preds = argmaxRow(probs, batch * places, classes);
   let digitHits = 0;
+  let digitTotal = 0;
   let exactHits = 0;
   for (let i = 0; i < batch; i++) {
+    const active = activeCounts
+      ? Math.min(places, Math.max(1, activeCounts[i]!))
+      : activePlaceCount(digitTargets.subarray(i * places, (i + 1) * places), places);
     let ok = true;
     for (let p = 0; p < places; p++) {
       const idx = i * places + p;
-      if (preds[idx] === digitTargets[idx]!) digitHits++;
-      else ok = false;
+      if (preds[idx] !== digitTargets[idx]!) ok = false;
+      if (p < active) {
+        digitTotal++;
+        if (preds[idx] === digitTargets[idx]!) digitHits++;
+      }
     }
     if (ok) exactHits++;
   }
-  return { exact: exactHits / batch, digit: digitHits / (batch * places) };
+  return { exact: exactHits / batch, digit: digitTotal === 0 ? 0 : digitHits / digitTotal };
 }

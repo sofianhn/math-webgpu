@@ -277,13 +277,16 @@ export class ArithmeticDataset implements Dataset {
   sample(batchSize: number): Batch {
     const inputs = new Float32Array(batchSize * INPUT_DIM);
     const digitTargets = new Uint8Array(batchSize * ANSWER_DIGITS);
+    const activeCounts = new Uint8Array(batchSize);
     const texts: string[] = [];
     const answers: string[] = [];
-
     for (let i = 0; i < batchSize; i++) {
       const { a, op, b, answer } = this.sampleOne();
       inputs.set(encodeFeatures(a, op, b), i * INPUT_DIM);
       digitTargets.set(toDigits(answer, ANSWER_DIGITS), i * ANSWER_DIGITS);
+      // Always supervise every answer place so high zeros stay zero; loss weights
+      // down-weight far trailing zeros (see model.backward / digitCrossEntropy).
+      activeCounts[i] = ANSWER_DIGITS;
       texts.push(describeExample(a, op, b, answer));
       answers.push(answer.toString());
     }
@@ -291,6 +294,7 @@ export class ArithmeticDataset implements Dataset {
     return {
       inputs: tensor([batchSize, INPUT_DIM], inputs),
       digitTargets,
+      activeCounts,
       texts,
       answers,
     };

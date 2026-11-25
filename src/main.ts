@@ -427,6 +427,7 @@ async function boot() {
           stepsPerEpoch,
           tokensPerExample: TOKENS_PER_EXAMPLE,
           heldoutBatch,
+          heldoutExprs: holdExprs,
           curriculumStartDigits: currStart,
           curriculumEndDigits: currEnd,
           onCurriculumDigits: (d) => trainDataset?.setMaxDigits(d),

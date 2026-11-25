@@ -15,6 +15,12 @@ export interface Batch {
    * Zero-padded to ANSWER_DIGITS places (leading high places are 0).
    */
   digitTargets: Uint8Array;
+  /**
+   * Per-example count of digit places to supervise (length = batch).
+   * Includes trailing zeros out to the curriculum frontier so high places
+   * learn to stay 0 — otherwise a shared digit head copies the ones digit upward.
+   */
+  activeCounts?: Uint8Array;
   /** Exact answers as decimal strings (BigInt-safe). */
   answers?: string[];
   /** Optional human-readable expressions for logging. */
@@ -55,7 +61,11 @@ export interface Model {
   parameters(): { name: string; tensor: Tensor }[];
   forward(inputs: Tensor): Promise<ForwardResult>;
   /** Hybrid: gradients computed on CPU from cached activations + digit targets. */
-  backward(cache: Record<string, Tensor>, digitTargets: Uint8Array): Map<string, Tensor>;
+  backward(
+    cache: Record<string, Tensor>,
+    digitTargets: Uint8Array,
+    activeCounts?: Uint8Array,
+  ): Map<string, Tensor>;
   applyGradients(grads: Map<string, Tensor>, lr: number): void;
 }
 
@@ -105,6 +115,11 @@ export interface TrainerConfig {
   tokensPerExample?: number;
   /** Optional held-out batch evaluated every epoch (never used for gradients). */
   heldoutBatch?: Batch;
+  /**
+   * Optional held-out expressions; when set with curriculum, each epoch evaluates
+   * only exprs whose operands fit the current maxDigits (plus full bank at end).
+   */
+  heldoutExprs?: ReadonlyArray<readonly [bigint, string, bigint]>;
   strategy?: StageStrategy;
   /** Called after each epoch; may be async so the UI can paint mid-train. */
   onMetrics?: (m: TrainMetrics) => void | Promise<void>;

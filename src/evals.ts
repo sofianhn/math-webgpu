@@ -167,21 +167,24 @@ export function isHeldOut(a: bigint, b: bigint, onesDigits: number[]): boolean {
   return isOnesDigitHeldOut(a, b, onesDigits);
 }
 
-export function batchFromExprs(exprs: HoldoutExpr[]): Batch {
+export function batchFromExprs(exprs: HoldoutExpr[], frontierDigits = OPERAND_DIGITS): Batch {
   const B = exprs.length;
   const inputs = new Float32Array(B * INPUT_DIM);
   const digitTargets = new Uint8Array(B * ANSWER_DIGITS);
+  const activeCounts = new Uint8Array(B);
   const texts: string[] = [];
   const answers: string[] = [];
+  void frontierDigits;
   for (let i = 0; i < B; i++) {
     const [a, op, b] = exprs[i]!;
     const answer = computeAnswer(a, op, b);
     inputs.set(encodeFeatures(a, op, b), i * INPUT_DIM);
     digitTargets.set(toDigits(answer, ANSWER_DIGITS), i * ANSWER_DIGITS);
+    activeCounts[i] = ANSWER_DIGITS;
     texts.push(describeExample(a, op, b, answer));
     answers.push(answer.toString());
   }
-  return { inputs: tensor([B, INPUT_DIM], inputs), digitTargets, texts, answers };
+  return { inputs: tensor([B, INPUT_DIM], inputs), digitTargets, activeCounts, texts, answers };
 }
 
 /** Stratified probes by max operand digit length. */
@@ -211,8 +214,15 @@ export async function evaluateModel(model: Model, batch: Batch): Promise<EvalRep
   const { logits } = await model.forward(batch.inputs);
   const [B] = logits.shape;
   const places = model.answerDigits;
-  const loss = digitCrossEntropy(logits.data, B, places, batch.digitTargets);
-  const { exact, digit } = digitAccuracy(logits.data, B, places, batch.digitTargets);
+  const loss = digitCrossEntropy(logits.data, B, places, batch.digitTargets, 10, batch.activeCounts);
+  const { exact, digit } = digitAccuracy(
+    logits.data,
+    B,
+    places,
+    batch.digitTargets,
+    10,
+    batch.activeCounts,
+  );
   return {
     loss,
     perplexity: Math.exp(loss),

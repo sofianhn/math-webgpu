@@ -1,13 +1,21 @@
 import type { ForwardResult, Model, Tensor } from "./types";
 import type { MatmulBackend } from "./webgpu";
-import { addBiasInPlace, randn, reluInPlace, softmaxRows, tensor, zeros } from "./tensor";
+import {
+  activePlaceCount,
+  addBiasInPlace,
+  randn,
+  reluInPlace,
+  softmaxRows,
+  tensor,
+  zeros,
+} from "./tensor";
 import { ANSWER_DIGITS, INPUT_DIM, fromDigits } from "./data";
 
 export const DEFAULT_HIDDEN = 256;
 /** Softmax width per answer place. */
 export const DIGIT_CLASSES = 10;
 /** Place embedding width (shared digit head). */
-export const PLACE_DIM = 32;
+export const PLACE_DIM = 48;
 
 /**
  * Place-value MLP calculator: input → ReLU → ReLU → shared digit head
@@ -40,7 +48,12 @@ export class TinyMathMlp implements Model {
     this.b1 = zeros([hidden]);
     this.W2 = randn([hidden, hidden], Math.sqrt(2 / hidden));
     this.b2 = zeros([hidden]);
-    this.placeEmb = randn([ANSWER_DIGITS, PLACE_DIM], 0.02);
+    // Stronger place embeddings so the shared head can tell ones from 10^k.
+    this.placeEmb = randn([ANSWER_DIGITS, PLACE_DIM], 0.08);
+    // Orthogonal-ish one-hot hint in the first ANSWER_DIGITS dims when PLACE_DIM allows.
+    for (let p = 0; p < ANSWER_DIGITS; p++) {
+      this.placeEmb.data[p * PLACE_DIM + (p % PLACE_DIM)]! += 1.0;
+    }
     const inD = hidden + PLACE_DIM;
     this.Wd = randn([inD, DIGIT_CLASSES], Math.sqrt(2 / inD));
     this.bd = zeros([DIGIT_CLASSES]);
@@ -143,7 +156,11 @@ export class TinyMathMlp implements Model {
     };
   }
 
-  backward(cache: Record<string, Tensor>, digitTargets: Uint8Array): Map<string, Tensor> {
+  backward(
+    cache: Record<string, Tensor>,
+    digitTargets: Uint8Array,
+    activeCounts?: Uint8Array,
+  ): Map<string, Tensor> {
     const x = cache.x!;
     const h1 = cache.h1!;
     const h1Pre = cache.h1Pre!;
@@ -161,17 +178,24 @@ export class TinyMathMlp implements Model {
     }
 
     const probs = softmaxRows(digitLogits.data, rows, DIGIT_CLASSES);
-    const dLogits = probs.slice();
-    // Place weights: lower places (carries) slightly heavier; mid mul places matter too.
+    const dLogits = new Float32Array(probs.length); // zeros outside active places
+    // Supervise active places (curriculum frontier + significant digits).
+    // Lower places (carries) get a slightly heavier weight.
     for (let i = 0; i < B; i++) {
-      for (let p = 0; p < ANSWER_DIGITS; p++) {
+      const active = activeCounts
+        ? Math.min(ANSWER_DIGITS, Math.max(1, activeCounts[i]!))
+        : ANSWER_DIGITS;
+      const rowDigits = digitTargets.subarray(i * ANSWER_DIGITS, (i + 1) * ANSWER_DIGITS);
+      const sig = activePlaceCount(rowDigits, ANSWER_DIGITS);
+      for (let p = 0; p < active; p++) {
         const row = i * ANSWER_DIGITS + p;
         const dig = digitTargets[row]!;
-        dLogits[row * DIGIT_CLASSES + dig]! -= 1;
-        const w = p < 6 ? 1.25 : p < 12 ? 1.1 : 0.85;
+        // Carry-heavy low places > mid > far trailing zeros.
+        const w = p < sig ? (p < 4 ? 1.35 : 1.15) : p < sig + 2 ? 0.55 : 0.18;
         for (let d = 0; d < DIGIT_CLASSES; d++) {
-          dLogits[row * DIGIT_CLASSES + d]! = (dLogits[row * DIGIT_CLASSES + d]! / B) * w;
+          dLogits[row * DIGIT_CLASSES + d] = (probs[row * DIGIT_CLASSES + d]! / B) * w;
         }
+        dLogits[row * DIGIT_CLASSES + dig]! -= w / B;
       }
     }
 

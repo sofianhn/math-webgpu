@@ -277,9 +277,9 @@ export async function runDigitRl(
     rewardSum += meanReward;
 
     const combined = new Map<string, Tensor>();
-    addGrads(combined, model.backward(cache, sampledTargets), -meanAdv);
+    addGrads(combined, model.backward(cache, sampledTargets, batch.activeCounts), -meanAdv);
     if (ceMix > 0) {
-      addGrads(combined, model.backward(cache, batch.digitTargets), ceMix);
+      addGrads(combined, model.backward(cache, batch.digitTargets, batch.activeCounts), ceMix);
     }
 
     if (gradsNonZero(combined)) {
@@ -367,8 +367,8 @@ export async function runDpoDigits(
 
     // Push toward chosen, away from rejected.
     const combined = new Map<string, Tensor>();
-    addGrads(combined, model.backward(cache, batch.digitTargets), 1.0);
-    addGrads(combined, model.backward(cache, rejected), -0.7);
+    addGrads(combined, model.backward(cache, batch.digitTargets, batch.activeCounts), 1.0);
+    addGrads(combined, model.backward(cache, rejected, batch.activeCounts), -0.7);
 
     if (gradsNonZero(combined)) {
       tAdam += 1;

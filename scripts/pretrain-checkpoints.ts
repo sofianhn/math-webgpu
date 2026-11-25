@@ -124,6 +124,7 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     learningRate: preset.lr,
     stepsPerEpoch: steps,
     heldoutBatch: heldBatch,
+    heldoutExprs: holdExprs,
     curriculumStartDigits: preset.curriculumStart,
     curriculumEndDigits: preset.curriculumEnd,
     onCurriculumDigits: (d) => dataset.setMaxDigits(d),
