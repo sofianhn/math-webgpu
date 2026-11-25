@@ -14,15 +14,13 @@ import { ANSWER_DIGITS, INPUT_DIM, fromDigits } from "./data";
 export const DEFAULT_HIDDEN = 256;
 /** Softmax width per answer place. */
 export const DIGIT_CLASSES = 10;
-/** Place embedding width (shared digit head). */
-export const PLACE_DIM = 48;
 
 /**
- * Place-value MLP calculator: input → ReLU → ReLU → shared digit head
- * conditioned on place embeddings (18 LSD-first answer places).
+ * Place-value MLP calculator: input → ReLU → ReLU → independent digit heads
+ * (one 10-way classifier per answer place, LSD-first, 18 places).
  *
- * Shared head + place emb generalizes across digit lengths better than
- * independent H/T/O heads once operands stretch to nine digits.
+ * Independent heads matched the successful two-digit H/T/O design; a shared
+ * head + place embedding stalled ~19% exact on the same domain.
  */
 export class TinyMathMlp implements Model {
   readonly name = "digit-math-mlp-9";
@@ -35,11 +33,10 @@ export class TinyMathMlp implements Model {
   private readonly b1: Tensor;
   private readonly W2: Tensor;
   private readonly b2: Tensor;
-  /** [ANSWER_DIGITS, PLACE_DIM] place embeddings. */
-  private readonly placeEmb: Tensor;
-  /** Shared digit head: [H + PLACE_DIM, 10]. */
-  private readonly Wd: Tensor;
-  private readonly bd: Tensor;
+  /** Stacked per-place heads: row block p is W for place p. Shape [ANSWER_DIGITS * H, 10]. */
+  private readonly Wheads: Tensor;
+  /** Stacked biases: [ANSWER_DIGITS * 10]. */
+  private readonly bheads: Tensor;
 
   constructor(gpu: MatmulBackend, hidden = DEFAULT_HIDDEN) {
     this.gpu = gpu;
@@ -48,22 +45,15 @@ export class TinyMathMlp implements Model {
     this.b1 = zeros([hidden]);
     this.W2 = randn([hidden, hidden], Math.sqrt(2 / hidden));
     this.b2 = zeros([hidden]);
-    // Stronger place embeddings so the shared head can tell ones from 10^k.
-    this.placeEmb = randn([ANSWER_DIGITS, PLACE_DIM], 0.08);
-    // Orthogonal-ish one-hot hint in the first ANSWER_DIGITS dims when PLACE_DIM allows.
-    for (let p = 0; p < ANSWER_DIGITS; p++) {
-      this.placeEmb.data[p * PLACE_DIM + (p % PLACE_DIM)]! += 1.0;
-    }
-    const inD = hidden + PLACE_DIM;
-    this.Wd = randn([inD, DIGIT_CLASSES], Math.sqrt(2 / inD));
-    this.bd = zeros([DIGIT_CLASSES]);
+    const scale = Math.sqrt(2 / hidden);
+    this.Wheads = randn([ANSWER_DIGITS * hidden, DIGIT_CLASSES], scale);
+    this.bheads = zeros([ANSWER_DIGITS * DIGIT_CLASSES]);
   }
 
   static paramCount(hidden: number): number {
     const trunk = INPUT_DIM * hidden + hidden + hidden * hidden + hidden;
-    const place = ANSWER_DIGITS * PLACE_DIM;
-    const head = (hidden + PLACE_DIM) * DIGIT_CLASSES + DIGIT_CLASSES;
-    return trunk + place + head;
+    const heads = ANSWER_DIGITS * (hidden * DIGIT_CLASSES + DIGIT_CLASSES);
+    return trunk + heads;
   }
 
   weightNorms(): { name: string; l2: number; count: number }[] {
@@ -80,9 +70,8 @@ export class TinyMathMlp implements Model {
       { name: "b1", tensor: this.b1 },
       { name: "W2", tensor: this.W2 },
       { name: "b2", tensor: this.b2 },
-      { name: "placeEmb", tensor: this.placeEmb },
-      { name: "Wd", tensor: this.Wd },
-      { name: "bd", tensor: this.bd },
+      { name: "Wheads", tensor: this.Wheads },
+      { name: "bheads", tensor: this.bheads },
     ];
   }
 
@@ -107,41 +96,29 @@ export class TinyMathMlp implements Model {
     return { B, h1Pre, h1, h2Pre, h2 };
   }
 
-  /** Digit logits [B, ANSWER_DIGITS * 10] and per-row head inputs [B*ANSWER_DIGITS, H+PLACE_DIM]. */
-  private digitLogits(h: Float32Array, B: number): {
-    logits: Float32Array;
-    headIn: Float32Array;
-  } {
+  private digitLogits(h: Float32Array, B: number): Float32Array {
     const H = this.hidden;
-    const inD = H + PLACE_DIM;
     const logits = new Float32Array(B * ANSWER_DIGITS * DIGIT_CLASSES);
-    const headIn = new Float32Array(B * ANSWER_DIGITS * inD);
-
     for (let i = 0; i < B; i++) {
       for (let p = 0; p < ANSWER_DIGITS; p++) {
-        const row = (i * ANSWER_DIGITS + p) * inD;
-        for (let k = 0; k < H; k++) headIn[row + k] = h[i * H + k]!;
-        for (let e = 0; e < PLACE_DIM; e++) {
-          headIn[row + H + e] = this.placeEmb.data[p * PLACE_DIM + e]!;
-        }
+        const wOff = p * H * DIGIT_CLASSES;
+        const bOff = p * DIGIT_CLASSES;
         const outOff = (i * ANSWER_DIGITS + p) * DIGIT_CLASSES;
         for (let d = 0; d < DIGIT_CLASSES; d++) {
-          let s = this.bd.data[d]!;
-          for (let k = 0; k < inD; k++) {
-            s += headIn[row + k]! * this.Wd.data[k * DIGIT_CLASSES + d]!;
+          let s = this.bheads.data[bOff + d]!;
+          for (let k = 0; k < H; k++) {
+            s += h[i * H + k]! * this.Wheads.data[wOff + k * DIGIT_CLASSES + d]!;
           }
           logits[outOff + d] = s;
         }
       }
     }
-    return { logits, headIn };
+    return logits;
   }
 
   async forward(inputs: Tensor): Promise<ForwardResult> {
     const { B, h1Pre, h1, h2Pre, h2 } = await this.trunk(inputs);
-    const { logits, headIn } = this.digitLogits(h2, B);
-    const inD = this.hidden + PLACE_DIM;
-
+    const logits = this.digitLogits(h2, B);
     return {
       logits: tensor([B, ANSWER_DIGITS * DIGIT_CLASSES], logits),
       cache: {
@@ -150,7 +127,6 @@ export class TinyMathMlp implements Model {
         h1: tensor([B, this.hidden], h1),
         h2Pre: tensor([B, this.hidden], h2Pre),
         h: tensor([B, this.hidden], h2),
-        headIn: tensor([B * ANSWER_DIGITS, inD], headIn),
         digitLogits: tensor([B, ANSWER_DIGITS * DIGIT_CLASSES], logits),
       },
     };
@@ -166,11 +142,9 @@ export class TinyMathMlp implements Model {
     const h1Pre = cache.h1Pre!;
     const h2 = cache.h!;
     const h2Pre = cache.h2Pre!;
-    const headIn = cache.headIn!;
     const digitLogits = cache.digitLogits!;
     const [B] = x.shape;
     const H = this.hidden;
-    const inD = H + PLACE_DIM;
     const rows = B * ANSWER_DIGITS;
 
     if (digitTargets.length !== rows) {
@@ -178,9 +152,7 @@ export class TinyMathMlp implements Model {
     }
 
     const probs = softmaxRows(digitLogits.data, rows, DIGIT_CLASSES);
-    const dLogits = new Float32Array(probs.length); // zeros outside active places
-    // Supervise active places (curriculum frontier + significant digits).
-    // Lower places (carries) get a slightly heavier weight.
+    const dLogits = new Float32Array(probs.length);
     for (let i = 0; i < B; i++) {
       const active = activeCounts
         ? Math.min(ANSWER_DIGITS, Math.max(1, activeCounts[i]!))
@@ -190,7 +162,6 @@ export class TinyMathMlp implements Model {
       for (let p = 0; p < active; p++) {
         const row = i * ANSWER_DIGITS + p;
         const dig = digitTargets[row]!;
-        // Carry-heavy low places > mid > far trailing zeros.
         const w = p < sig ? (p < 4 ? 1.35 : 1.15) : p < sig + 2 ? 0.55 : 0.18;
         for (let d = 0; d < DIGIT_CLASSES; d++) {
           dLogits[row * DIGIT_CLASSES + d] = (probs[row * DIGIT_CLASSES + d]! / B) * w;
@@ -199,33 +170,28 @@ export class TinyMathMlp implements Model {
       }
     }
 
-    const dWd = zeros([inD, DIGIT_CLASSES]);
-    const dbd = zeros([DIGIT_CLASSES]);
-    const dHeadIn = new Float32Array(rows * inD);
-    const dPlace = zeros([ANSWER_DIGITS, PLACE_DIM]);
+    const dWheads = zeros([ANSWER_DIGITS * H, DIGIT_CLASSES]);
+    const dbheads = zeros([ANSWER_DIGITS * DIGIT_CLASSES]);
     const dH2 = new Float32Array(B * H);
 
-    for (let row = 0; row < rows; row++) {
-      const p = row % ANSWER_DIGITS;
-      const i = Math.floor(row / ANSWER_DIGITS);
-      for (let k = 0; k < inD; k++) {
-        const hk = headIn.data[row * inD + k]!;
-        let back = 0;
-        for (let d = 0; d < DIGIT_CLASSES; d++) {
-          const g = dLogits[row * DIGIT_CLASSES + d]!;
-          dWd.data[k * DIGIT_CLASSES + d]! += hk * g;
-          back += g * this.Wd.data[k * DIGIT_CLASSES + d]!;
+    for (let i = 0; i < B; i++) {
+      for (let p = 0; p < ANSWER_DIGITS; p++) {
+        const wOff = p * H * DIGIT_CLASSES;
+        const bOff = p * DIGIT_CLASSES;
+        const row = i * ANSWER_DIGITS + p;
+        for (let k = 0; k < H; k++) {
+          const hk = h2.data[i * H + k]!;
+          let back = 0;
+          for (let d = 0; d < DIGIT_CLASSES; d++) {
+            const g = dLogits[row * DIGIT_CLASSES + d]!;
+            dWheads.data[wOff + k * DIGIT_CLASSES + d]! += hk * g;
+            back += g * this.Wheads.data[wOff + k * DIGIT_CLASSES + d]!;
+          }
+          dH2[i * H + k]! += back;
         }
-        dHeadIn[row * inD + k] = back;
-      }
-      for (let d = 0; d < DIGIT_CLASSES; d++) {
-        dbd.data[d]! += dLogits[row * DIGIT_CLASSES + d]!;
-      }
-      for (let k = 0; k < H; k++) {
-        dH2[i * H + k]! += dHeadIn[row * inD + k]!;
-      }
-      for (let e = 0; e < PLACE_DIM; e++) {
-        dPlace.data[p * PLACE_DIM + e]! += dHeadIn[row * inD + H + e]!;
+        for (let d = 0; d < DIGIT_CLASSES; d++) {
+          dbheads.data[bOff + d]! += dLogits[row * DIGIT_CLASSES + d]!;
+        }
       }
     }
 
@@ -265,15 +231,13 @@ export class TinyMathMlp implements Model {
       for (let k = 0; k < H; k++) db1.data[k]! += dH1Pre[i * H + k]!;
     }
 
-    void h2; // kept for API symmetry / future residual hooks
     return new Map([
       ["W1", dW1],
       ["b1", db1],
       ["W2", dW2],
       ["b2", db2],
-      ["placeEmb", dPlace],
-      ["Wd", dWd],
-      ["bd", dbd],
+      ["Wheads", dWheads],
+      ["bheads", dbheads],
     ]);
   }
 

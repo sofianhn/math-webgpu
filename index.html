@@ -48,7 +48,7 @@
         <details class="advanced">
           <summary>Advanced knobs (filled by saved model / Train New)</summary>
           <p class="hint">
-            Domain = operands <strong>0–999,999,999</strong> (9 digits). Shared digit head
+            Domain = operands <strong>0–999,999,999</strong> (9 digits). Independent digit heads
             predicts 18 LSD-first answer places. Curriculum grows digit length during train.
           </p>
           <label>
@@ -101,8 +101,8 @@
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
         <p class="hint">
           Count = how many numbers in that table. Bars = magnitude before → after.
-          Trunk is <strong>W1 → W2</strong>; answer head is shared <strong>Wd</strong> with
-          <strong>placeEmb</strong> (18 places).
+          Trunk is <strong>W1 → W2</strong>; answer head is independent <strong>Wheads</strong> (
+          18 places).
         </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>

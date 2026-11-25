@@ -20,15 +20,15 @@ async function main() {
   const gpu = new CpuBackend();
   const model = new TinyMathMlp(gpu, 256);
   const filter = (a: bigint, b: bigint, op: Op) => !isExpressionHeldOut(a, op, b);
-  const ds = new ArithmeticDataset({ filter, mix: NINJA_MIX, hardBias: 0.5, maxDigits: 2 });
+  const ds = new ArithmeticDataset({ filter, mix: NINJA_MIX, hardBias: 0.5, maxDigits: 1 });
   const pipe = new MathDataPipeline("pretrain", ds);
   const hold = buildExpressionHoldout(200, 10, 2);
   const trainer = new MathTrainer();
-  const epochs = 40;
+  const epochs = 60; // 30 @ 1-digit, 30 @ 2-digit staircase
   const batch = 64;
   const examples = 4096;
   const steps = examples / batch;
-  console.log(`2-digit focus · ep=${epochs} · steps=${steps} · hold n=${hold.length}`);
+  console.log(`2-digit staircase · ep=${epochs} · steps=${steps} · hold n=${hold.length}`);
   await trainer.train(model, pipe, {
     stage: "pretrain",
     epochs,

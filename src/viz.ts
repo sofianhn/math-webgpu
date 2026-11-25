@@ -5,9 +5,8 @@ const PARAM_BLURB: Record<string, string> = {
   b1: "bias for first hidden layer",
   W2: "first → second hidden layer (deeper trunk)",
   b2: "bias for second hidden layer",
-  placeEmb: "learned embedding per answer place (ones…10¹⁷)",
-  Wd: "shared digit head (hidden ⊕ place → 0–9)",
-  bd: "bias for shared digit head",
+  Wheads: "per-place digit heads (18 × hidden → 0–9)",
+  bheads: "biases for per-place digit heads",
 };
 
 function formatPpl(p: number): string {

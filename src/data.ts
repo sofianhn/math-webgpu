@@ -197,19 +197,20 @@ export function randomOperand(digits: number): bigint {
   return lo + randBigIntInclusive(hi - lo);
 }
 
-/** Random operand with 1..maxDigits places (slight bias toward longer). */
+/**
+ * Random operand with 1..maxDigits places.
+ * Mix: ~45% uniform replay of shorter lengths (anti-forgetting),
+ * ~55% at the curriculum frontier.
+ */
 export function randomOperandUpTo(maxDigits: number): bigint {
   const m = Math.max(1, Math.min(OPERAND_DIGITS, Math.floor(maxDigits)));
-  let r = Math.random() * ((m * (m + 1)) / 2);
-  let digits = 1;
-  for (let k = 1; k <= m; k++) {
-    r -= k;
-    if (r <= 0) {
-      digits = k;
-      break;
-    }
+  let digits: number;
+  if (m === 1 || Math.random() < 0.45) {
+    digits = 1 + Math.floor(Math.random() * m);
+  } else {
+    digits = m;
   }
-  if (digits === 1 && Math.random() < 0.15) return 0n;
+  if (digits === 1 && Math.random() < 0.12) return 0n;
   return randomOperand(digits);
 }
 
