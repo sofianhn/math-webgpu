@@ -4,12 +4,12 @@
     {
       "id": "simple",
       "label": "Simple",
-      "blurb": "Faster train · staircase curriculum to 4 digits · lighter mul mix",
+      "blurb": "Curriculum to 4 digits + Digit RL polish. Hold-out 82.4% \u2192 90.6% (+8.2 pp).",
       "path": "checkpoints/simple.json",
       "hidden": 256,
-      "epochs": 100,
+      "epochs": 140,
       "paramCount": 159412,
-      "finalHoldoutAcc": 0.03515625,
+      "finalHoldoutAcc": 0.90625,
       "curriculumEnd": 4
     }
   ]

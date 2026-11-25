@@ -367,8 +367,9 @@ export async function runDpoDigits(
 
     // Push toward chosen, away from rejected.
     const combined = new Map<string, Tensor>();
+    // Gentle preference: mostly CE(truth), mild push away from the near-miss.
     addGrads(combined, model.backward(cache, batch.digitTargets, batch.activeCounts), 1.0);
-    addGrads(combined, model.backward(cache, rejected, batch.activeCounts), -0.7);
+    addGrads(combined, model.backward(cache, rejected, batch.activeCounts), -0.25);
 
     if (gradsNonZero(combined)) {
       tAdam += 1;
