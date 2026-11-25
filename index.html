@@ -4,18 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3EΣ%3C/text%3E%3C/svg%3E" />
-    <title>Math WebGPU — tiny arithmetic model</title>
-    <script type="module" crossorigin src="/math-webgpu/assets/index-CqNXKbpe.js"></script>
+    <title>Math WebGPU — nine-digit MLP calculator</title>
+    <script type="module" crossorigin src="/math-webgpu/assets/index-DiSK4Oqr.js"></script>
     <link rel="stylesheet" crossorigin href="/math-webgpu/assets/index--qs_lpS1.css">
   </head>
   <body>
     <main>
       <h1>Math WebGPU</h1>
       <p class="lede">
-        Load a <strong>pretrained</strong> Simple / Mid / Ninja checkpoint for instant eval graphs,
-        run <strong>Digit RL</strong> (correctness reward, no English) to update weights, or
-        <strong>Train New</strong> from scratch (slow on phones). Default = <strong>Ninja</strong>.
-        <a class="blog-link" href="./training.html">Read the training blog →</a>
+        A browser <strong>MLP calculator</strong> for up to <strong>nine-digit</strong> operands —
+        place-value encoding, 18 digit heads, digit-length curriculum, then Digit RL / DPO.
+        Load a pretrained checkpoint or Train New. Default = <strong>Ninja</strong>.
+        <a class="blog-link" href="./training.html">Techniques blog →</a>
       </p>
 
       <section id="status" aria-live="polite">
@@ -49,16 +49,16 @@
         <details class="advanced">
           <summary>Advanced knobs (filled by saved model / Train New)</summary>
           <p class="hint">
-            Domain = operands <strong>0–99</strong>. Digit-wise answer heads compose
-            hundreds / tens / ones. Tweaking these leaves Mode on “custom.”
+            Domain = operands <strong>0–999,999,999</strong> (9 digits). Independent digit heads
+            predict 18 LSD-first answer places. Staircase curriculum grows digit length during train.
           </p>
           <label>
             Hidden units
-            <input id="hidden" type="number" min="16" max="512" step="8" value="288" />
+            <input id="hidden" type="number" min="32" max="768" step="8" value="512" />
           </label>
           <label>
             Examples / epoch
-            <input id="examples" type="number" min="128" max="20000" step="64" value="12288" />
+            <input id="examples" type="number" min="128" max="65536" step="64" value="16384" />
           </label>
           <label>
             Batch size
@@ -66,11 +66,11 @@
           </label>
           <label>
             Epochs
-            <input id="epochs" type="number" min="1" max="300" value="160" />
+            <input id="epochs" type="number" min="1" max="400" value="270" />
           </label>
           <label>
             Learning rate
-            <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.0045" />
+            <input id="lr" type="number" min="0.0001" max="0.5" step="0.0001" value="0.003" />
           </label>
           <p id="param-count" class="hint param-count">Parameters: —</p>
           <p id="token-count" class="hint param-count">Tokens / epoch: —</p>
@@ -80,8 +80,8 @@
       <section id="data" hidden>
         <h2>What data is it training on?</h2>
         <p class="hint">
-          Train rows skip the frozen expression bank when held-out is on — but still use
-          every ones/tens digit. The panel lists expressions the optimizer never saw.
+          Rich synthetic mix across digit lengths 1→9 with carry/mul bias. Train rows skip
+          the frozen expression bank when held-out is on.
         </p>
         <div id="data-feed" class="data-feed" aria-live="polite">
           <p class="data-headline">Hit Train New to stream live batch examples here.</p>
@@ -102,8 +102,8 @@
         <h3 class="subhead">Parameter tables (the model’s memory)</h3>
         <p class="hint">
           Count = how many numbers in that table. Bars = magnitude before → after.
-          Trunk is <strong>W1 → W2</strong> (two ReLU layers); heads are
-          <strong>Wh / Wt / Wo</strong> (hundreds / tens / ones).
+          Trunk is <strong>W1 → W2</strong>; answers use independent <strong>Wheads</strong>
+          (18 places).
         </p>
         <div id="norms" class="norms" aria-live="polite"></div>
         <section id="log" aria-label="Training log"></section>
@@ -112,46 +112,52 @@
       <section id="probe" hidden>
         <h2>Try an expression</h2>
         <p class="hint">
-          After loading Ninja (or training), try <code>47 × 19</code>,
-          <code>17 × 19</code>, <code>25 × 25</code>, and a held-out bank row.
+          After loading Ninja, try <code>47 × 19</code>, <code>123456789 + 987654321</code>,
+          <code>999999999 − 1</code>, and a held-out bank row.
         </p>
         <div class="row">
-          <input id="a" type="number" min="0" max="999" value="47" />
+          <input id="a" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="9" value="123456789" />
           <select id="op">
             <option value="+">+</option>
             <option value="-">−</option>
             <option value="*" selected>×</option>
             <option value="/">÷</option>
           </select>
-          <input id="b" type="number" min="0" max="999" value="19" />
+          <input id="b" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="9" value="2" />
           <button id="predict" type="button">Predict</button>
         </div>
         <p id="ood" class="ood" hidden></p>
         <p id="prediction"></p>
-        <h3 class="subhead">Top answer probabilities (composed digits)</h3>
+        <h3 class="subhead">Per-place digit confidence</h3>
         <div id="topk" class="topk"></div>
       </section>
 
       <section id="posttrain-note" class="posttrain-note" hidden>
-        <h2>Digit RL post-train (no English)</h2>
+        <h2>Post-train (no English)</h2>
         <p class="hint">
-          Runs on the <strong>loaded</strong> weights. Samples digit answers, rewards
-          H/T/O correctness (+ exact-match bonus), updates with self-critical REINFORCE.
-          No language channel — no CoT. Hold-out is measured before and after; then
-          you can save a new checkpoint JSON.
+          Runs on the <strong>loaded</strong> weights. <strong>Digit RL</strong> samples
+          answer digits and rewards correctness; <strong>DPO digits</strong> prefers the
+          true sequence over a near-miss. No language channel — no CoT.
         </p>
         <div class="rl-knobs">
           <label>
-            RL steps
+            Kind
+            <select id="post-kind">
+              <option value="digit-rl" selected>Digit RL</option>
+              <option value="dpo-digits">DPO digits</option>
+            </select>
+          </label>
+          <label>
+            Steps
             <input id="rl-steps" type="number" min="5" max="400" step="5" value="80" />
           </label>
           <label>
-            RL learning rate
-            <input id="rl-lr" type="number" min="0.0001" max="0.05" step="0.0001" value="0.0015" />
+            Learning rate
+            <input id="rl-lr" type="number" min="0.0001" max="0.05" step="0.0001" value="0.001" />
           </label>
         </div>
         <div class="action-row">
-          <button id="digit-rl" type="button" disabled>Run Digit RL</button>
+          <button id="digit-rl" type="button" disabled>Run post-train</button>
           <button id="save-ckpt" type="button" disabled>Save checkpoint</button>
         </div>
         <p id="rl-status" class="rl-status" aria-live="polite"></p>
