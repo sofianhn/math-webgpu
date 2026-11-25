@@ -199,13 +199,13 @@ export function randomOperand(digits: number): bigint {
 
 /**
  * Random operand with 1..maxDigits places.
- * Mix: ~45% uniform replay of shorter lengths (anti-forgetting),
- * ~55% at the curriculum frontier.
+ * Mix: ~70% uniform replay of shorter lengths (anti-forgetting),
+ * ~30% at the curriculum frontier.
  */
 export function randomOperandUpTo(maxDigits: number): bigint {
   const m = Math.max(1, Math.min(OPERAND_DIGITS, Math.floor(maxDigits)));
   let digits: number;
-  if (m === 1 || Math.random() < 0.45) {
+  if (m === 1 || Math.random() < 0.7) {
     digits = 1 + Math.floor(Math.random() * m);
   } else {
     digits = m;

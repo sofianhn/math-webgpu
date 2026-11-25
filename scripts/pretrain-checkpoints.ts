@@ -18,6 +18,7 @@ import {
   NINJA_MIX,
   OPERAND_DIGITS,
   computeAnswer,
+  digitLength,
   encodeFeatures,
   type Op,
 } from "../src/data";
@@ -117,6 +118,7 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     `\n=== Pretrain ${preset.label} · H=${preset.hidden} · ep=${preset.epochs} · ex=${preset.examples} · steps=${steps} · curr ${preset.curriculumStart}→${preset.curriculumEnd}${FAST ? " [FAST]" : ""} ===`,
   );
   const t0 = Date.now();
+  let lastDigits = preset.curriculumStart;
   const hist = await trainer.train(model, pipe, {
     stage: "pretrain",
     epochs: preset.epochs,
@@ -127,9 +129,15 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     heldoutExprs: holdExprs,
     curriculumStartDigits: preset.curriculumStart,
     curriculumEndDigits: preset.curriculumEnd,
-    onCurriculumDigits: (d) => dataset.setMaxDigits(d),
+    onCurriculumDigits: (d) => {
+      if (d !== lastDigits) {
+        console.log(`  ↳ curriculum advance → maxDigits=${d}`);
+        lastDigits = d;
+      }
+      dataset.setMaxDigits(d);
+    },
     onMetrics: (m) => {
-      if (m.epoch === 1 || m.epoch === preset.epochs || m.epoch % Math.max(1, Math.floor(preset.epochs / 8)) === 0) {
+      if (m.epoch === 1 || m.epoch === preset.epochs || m.epoch % Math.max(1, Math.floor(preset.epochs / 10)) === 0) {
         const hold = m.heldout
           ? ` holdExact=${(m.heldout.accuracy * 100).toFixed(1)}% dig=${(m.heldout.digitAccuracy * 100).toFixed(1)}%`
           : "";
@@ -140,6 +148,7 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     },
   });
 
+  // Final metrics: full hold-out bank (already capped at curriculumEnd when built).
   const finalHoldout = await evaluateModel(model, heldBatch);
   const easy = await probeAcc(model, EASY);
   const hard = await probeAcc(model, HARD);

@@ -4,12 +4,12 @@
     {
       "id": "simple",
       "label": "Simple",
-      "blurb": "Faster train · curriculum to 4 digits · lighter mul mix",
+      "blurb": "Faster train · staircase curriculum to 4 digits · lighter mul mix",
       "path": "checkpoints/simple.json",
       "hidden": 256,
-      "epochs": 12,
-      "paramCount": 116618,
-      "finalHoldoutAcc": 0.01171875,
+      "epochs": 100,
+      "paramCount": 159412,
+      "finalHoldoutAcc": 0.03515625,
       "curriculumEnd": 4
     }
   ]

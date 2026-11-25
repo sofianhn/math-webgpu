@@ -17,13 +17,22 @@ const DEFAULT_STAGES: Record<TrainingStage, true> = {
 };
 void DEFAULT_STAGES;
 
-/** Staircase curriculum: linger on each digit length before advancing. */
+/**
+ * Staircase curriculum with more epochs on longer lengths
+ * (weights 1,2,3,… so stage k gets k / Σ shares of training).
+ */
 function curriculumDigits(epoch: number, epochs: number, start: number, end: number): number {
   if (epochs <= 1) return end;
   const stages = Math.max(1, end - start + 1);
-  const per = Math.max(1, Math.floor(epochs / stages));
-  const idx = Math.min(stages - 1, Math.floor((epoch - 1) / per));
-  return start + idx;
+  const weights = Array.from({ length: stages }, (_, i) => i + 1);
+  const totalW = weights.reduce((a, b) => a + b, 0);
+  const t = (epoch - 0.5) / epochs;
+  let acc = 0;
+  for (let i = 0; i < stages; i++) {
+    acc += weights[i]! / totalW;
+    if (t <= acc) return start + i;
+  }
+  return end;
 }
 
 /**

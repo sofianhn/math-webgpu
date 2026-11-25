@@ -1,88 +1,65 @@
 # Math WebGPU
 
-Minimal TypeScript + WebGPU project: a tiny MLP learns basic arithmetic (add / sub / mul / div on digits 0–9) in the browser.
+Browser TypeScript + WebGPU: a tiny MLP learns to act like a **nine-digit calculator**
+(add / sub / mul / div on operands up to \(10^9-1\)).
 
-Architecture is staged for **pretrain → finetune → rl**. **Pretrain** and **digit RL** post-training are implemented in-browser; finetune remains a plug-in point.
+Pipeline: **pretrain → digit RL / DPO-digits → probe**. Checkpoints ship with the Pages build.
 
-## Live demo (GitHub Pages)
+## Live demo
 
 **https://sofianhn.github.io/math-webgpu/**
 
-Two-digit operands **0–99**. Load pretrained **Simple / Mid / Ninja** checkpoints, run **Digit RL** (digit-wise correctness reward, no English), compare hold-out before→after, and **Save checkpoint**. Or **Train New** from scratch. See the training blog: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md).
+Techniques write-up: [docs/training-the-tiny-math-mlp.md](./docs/training-the-tiny-math-mlp.md) · [live blog](https://sofianhn.github.io/math-webgpu/training.html)
 
 ## Requirements
 
-- **Node.js** 18+ (for Vite)
-- A **WebGPU** browser:
-  - Chrome or Edge 113+
-  - Safari 17+ (macOS / iOS)
-  - Firefox: enable `dom.webgpu.enabled` (experimental)
-- Serve over **localhost** or HTTPS (`navigator.gpu` is unavailable on insecure remote origins)
+- Node.js 18+
+- A WebGPU browser (Chrome/Edge 113+, Safari 17+, or Firefox with `dom.webgpu.enabled`)
+- Serve over localhost or HTTPS
 
 ## Install & run
 
 ```bash
-cd math-webgpu
 npm install
 npm run dev
 ```
 
-Open the URL Vite prints (default `http://localhost:5173`). A saved **Ninja** checkpoint loads by default — inspect curves, **Run Eval**, **Digit RL**, or **Train New**. Offline:
+Offline pretrain / post-train:
 
 ```bash
-npm run pretrain:checkpoints   # rebuild Simple/Mid/Ninja weights
-npm run rl:digit               # digit RL on Ninja; prints hold-out Δ
-CHECKPOINT=simple RL_STEPS=80 npm run rl:digit
+npm run pretrain:checkpoints          # Simple / Mid / Ninja → public/checkpoints/
+FAST=1 npm run pretrain:checkpoints   # short smoke
+CHECKPOINT_ONLY=ninja npm run pretrain:checkpoints
+npm run rl:digit                      # Digit RL on saved Ninja
+KIND=dpo-digits WRITE=1 npm run rl:digit
 ```
-
-Clone:
-
-```bash
-git clone https://github.com/sofianhn/math-webgpu.git
-cd math-webgpu
-```
-
 
 ## Layout
 
 ```
 math-webgpu/
-  index.html          Demo UI (saved models, curves, OOD probe)
-  public/checkpoints/ Pretrained Simple / Mid / Ninja (+ curves)
+  index.html
   docs/training-the-tiny-math-mlp.md
-  scripts/pretrain-checkpoints.ts
-  package.json
-  tsconfig.json
-  vite.config.ts
-  README.md
+  public/checkpoints/     # v2 nine-digit weights + curves
+  public/training.html    # techniques blog
   src/
-    main.ts           Boot WebGPU, load checkpoints / train / eval / predict
-    checkpoint.ts     Weights + hyperparams + curve format
-    posttrain.ts      Digit RL (REINFORCE + digit reward); DPO/self-consistency stubs
-    viz.ts            Loss/acc curves, weight norms, top-k probs
-    style.css
-    presets.ts        Simple / Mid / Ninja hyperparams
-    types.ts          Model / Dataset / Trainer / TrainingStage interfaces
-    tensor.ts         CPU tensor helpers (softmax, CE, ReLU, matmul)
-    webgpu.ts         navigator.gpu init + matmul compute shader
-    data.ts           Synthetic arithmetic Dataset + DataPipeline
-    model.ts          TinyMathMlp (GPU forward GEMM, CPU backward)
-    trainer.ts        Training loop with stage strategy hook
-    evals.ts          Frozen held-out bank + evaluateModel
+    data.ts               # 9-digit place encoding, curriculum sampler
+    model.ts              # trunk + 18 independent digit heads
+    trainer.ts            # Adam + staircase curriculum
+    posttrain.ts          # digit RL, DPO-digits, self-consistency
+    checkpoint.ts         # f32-b64 save/load (version 2)
+    main.ts               # WebGPU UI
 ```
 
 ## Hybrid WebGPU path
 
-| Step        | Where                                      |
-| ----------- | ------------------------------------------ |
-| Matmul (×2) | **WebGPU** compute shader                  |
-| Bias, ReLU  | CPU                                        |
-| Softmax / CE / backward / Adam | CPU                     |
-
-**Extension path:** keep activations and weights in GPU buffers, add WGSL kernels for bias-add / ReLU / softmax / `Xᵀ@dY` GEMMs, and run the full backward on-device. `WebGpuBackend.matmul` is the first kernel to build on.
+| Step | Where |
+| --- | --- |
+| Matmul (×2) | WebGPU compute shader |
+| Bias, ReLU, digit heads, softmax / CE / Adam | CPU |
 
 ## Stages
 
-- `pretrain` — implemented (`ArithmeticDataset` → CE classification)
-- `finetune` — `MathDataPipeline` rejects until you add instruction data + strategy
-- `rl` — digit RL in `src/posttrain.ts` (correctness reward on H/T/O); pipeline samples arithmetic rows for the RL loop
+- `pretrain` — synthetic arithmetic → digit CE
+- `rl` — Digit RL / DPO-digits via `posttrain.ts`
+- `finetune` — plug-in point for instruction packs
