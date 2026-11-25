@@ -1,12 +1,13 @@
 /**
  * Compact checkpoint format: weights + hyperparams + train/eval curves.
  * Weights are Float32 → base64 (binary-safe, ~1.33× raw size).
+ * Version 2 = nine-digit shared digit-head architecture.
  */
 import type { EvalSliceMetrics, TrainMetrics } from "./types";
 import type { TinyMathMlp } from "./model";
-import { INPUT_DIM, NUM_CLASSES } from "./data";
+import { ANSWER_DIGITS, INPUT_DIM, OPERAND_DIGITS } from "./data";
 
-export const CHECKPOINT_VERSION = 1 as const;
+export const CHECKPOINT_VERSION = 2 as const;
 
 export type CheckpointId = "simple" | "mid" | "ninja";
 
@@ -20,11 +21,15 @@ export type CheckpointHyperparams = {
   mix: "simple" | "ninja";
   hardBias: number;
   heldout: boolean;
+  curriculumStart: number;
+  curriculumEnd: number;
+  operandDigits: number;
+  answerDigits: number;
 };
 
-/** Optional digit-RL post-train summary attached to a saved checkpoint. */
+/** Optional post-train summary attached to a saved checkpoint. */
 export type CheckpointPostTrain = {
-  kind: "digit-rl";
+  kind: "digit-rl" | "dpo-digits" | "self-consistency" | "mixed";
   steps: number;
   meanReward: number;
   beforeHoldout: EvalSliceMetrics;
@@ -44,7 +49,8 @@ export type CheckpointMeta = {
     name: string;
     hidden: number;
     inputDim: number;
-    numClasses: number;
+    answerDigits: number;
+    operandDigits: number;
     paramCount: number;
   };
   hyperparams: CheckpointHyperparams;
@@ -57,13 +63,14 @@ export type CheckpointMeta = {
   curves: TrainMetrics[];
   /** Final frozen held-out eval after last epoch. */
   finalHoldout: EvalSliceMetrics;
-  /** Optional probe pack accuracies (easy / hard / curriculum). */
+  /** Optional probe pack accuracies (easy / hard / curriculum / by length). */
   probes?: {
     easy: number;
     hard: number;
     curriculum: number;
+    byLength?: Record<string, number>;
   };
-  /** Present when weights were updated by browser digit RL. */
+  /** Present when weights were updated by browser post-train. */
   postTrain?: CheckpointPostTrain;
 };
 
@@ -87,6 +94,7 @@ export type CheckpointManifest = {
     epochs: number;
     paramCount: number;
     finalHoldoutAcc: number;
+    curriculumEnd: number;
   }>;
 };
 
@@ -149,10 +157,11 @@ export function buildCheckpointMeta(opts: {
     blurb: opts.blurb,
     createdAt: new Date().toISOString(),
     arch: {
-      name: "digit-math-mlp",
+      name: "digit-math-mlp-9",
       hidden: opts.hyperparams.hidden,
       inputDim: INPUT_DIM,
-      numClasses: NUM_CLASSES,
+      answerDigits: opts.hyperparams.answerDigits ?? ANSWER_DIGITS,
+      operandDigits: opts.hyperparams.operandDigits ?? OPERAND_DIGITS,
       paramCount: opts.paramCount,
     },
     hyperparams: opts.hyperparams,
@@ -194,7 +203,9 @@ export async function fetchCheckpoint(id: CheckpointId): Promise<CheckpointFile>
   if (!res.ok) throw new Error(`Failed to load checkpoint ${id}: HTTP ${res.status}`);
   const ckpt = (await res.json()) as CheckpointFile;
   if (ckpt.version !== CHECKPOINT_VERSION) {
-    throw new Error(`Unsupported checkpoint version ${ckpt.version}`);
+    throw new Error(
+      `Unsupported checkpoint version ${ckpt.version} (need ${CHECKPOINT_VERSION} for nine-digit models)`,
+    );
   }
   return ckpt;
 }
@@ -209,7 +220,7 @@ export async function fetchManifest(): Promise<CheckpointManifest | null> {
   }
 }
 
-/** Trigger a browser download of a checkpoint JSON (post-RL save). */
+/** Trigger a browser download of a checkpoint JSON (post-train save). */
 export function downloadCheckpoint(ckpt: CheckpointFile, filename?: string): void {
   const name =
     filename ??

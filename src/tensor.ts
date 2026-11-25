@@ -109,3 +109,56 @@ export function argmaxRow(probs: Float32Array, rows: number, cols: number): Int3
   }
   return out;
 }
+
+/**
+ * Mean cross-entropy over digit-place rows.
+ * `logits` is [batch * places, 10] flattened as [batch, places * 10].
+ * `digitTargets` is [batch * places] with values 0–9.
+ */
+export function digitCrossEntropy(
+  logits: Float32Array,
+  batch: number,
+  places: number,
+  digitTargets: Uint8Array,
+  classes = 10,
+): number {
+  const rows = batch * places;
+  if (digitTargets.length !== rows) {
+    throw new Error(`digitTargets ${digitTargets.length} != ${rows}`);
+  }
+  let loss = 0;
+  for (let r = 0; r < rows; r++) {
+    const off = r * classes;
+    let max = -Infinity;
+    for (let c = 0; c < classes; c++) max = Math.max(max, logits[off + c]!);
+    let sum = 0;
+    for (let c = 0; c < classes; c++) sum += Math.exp(logits[off + c]! - max);
+    const t = digitTargets[r]!;
+    loss += -(logits[off + t]! - max - Math.log(sum));
+  }
+  return loss / rows;
+}
+
+/** Exact-match + mean digit accuracy from digit logits vs targets. */
+export function digitAccuracy(
+  logits: Float32Array,
+  batch: number,
+  places: number,
+  digitTargets: Uint8Array,
+  classes = 10,
+): { exact: number; digit: number } {
+  const probs = softmaxRows(logits, batch * places, classes);
+  const preds = argmaxRow(probs, batch * places, classes);
+  let digitHits = 0;
+  let exactHits = 0;
+  for (let i = 0; i < batch; i++) {
+    let ok = true;
+    for (let p = 0; p < places; p++) {
+      const idx = i * places + p;
+      if (preds[idx] === digitTargets[idx]!) digitHits++;
+      else ok = false;
+    }
+    if (ok) exactHits++;
+  }
+  return { exact: exactHits / batch, digit: digitHits / (batch * places) };
+}

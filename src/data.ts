@@ -4,114 +4,163 @@ import { tensor } from "./tensor";
 export const OPS = ["+", "-", "*", "/"] as const;
 export type Op = (typeof OPS)[number];
 
+/** Max operand length the encoder supports (nine decimal digits). */
+export const OPERAND_DIGITS = 9;
+/** Max answer places (9×9 mul → up to 18 digits). */
+export const ANSWER_DIGITS = 18;
+/** One-hot width per place. */
+export const DIGIT_SLOTS = 10;
+/** Largest in-domain operand: 10^9 − 1. */
+export const MAX_OPERAND = 10 ** OPERAND_DIGITS - 1; // 999_999_999
+
 /**
- * Two-digit operands 0–99 (default curriculum).
- * Three-digit values (≥100) are out of distribution.
+ * Place-value one-hots for both operands + op:
+ * 9×10 (a) + 4 (op) + 9×10 (b) = 184.
  */
-export const MAX_OPERAND = 99;
-/** Max answer class (mul is resampled until answer fits). */
-export const NUM_CLASSES = 1000;
+export const INPUT_DIM =
+  OPERAND_DIGITS * DIGIT_SLOTS + OPS.length + OPERAND_DIGITS * DIGIT_SLOTS;
 
-const DIGIT_SLOTS = 10; // tens or ones place: digits 0–9
+/** Feature “tokens”: each place digit + the operator. */
+export const TOKENS_PER_EXAMPLE = OPERAND_DIGITS * 2 + 1;
 
-export function computeAnswer(a: number, op: Op, b: number): number {
+export function computeAnswer(a: bigint, op: Op, b: bigint): bigint {
   switch (op) {
     case "+":
       return a + b;
     case "-":
-      return Math.max(0, a - b);
+      return a >= b ? a - b : 0n;
     case "*":
       return a * b;
     case "/":
-      return b === 0 ? 0 : Math.floor(a / b);
+      return b === 0n ? 0n : a / b;
+  }
+}
+
+/** Decimal digit count of a non-negative bigint (0 → 1). */
+export function digitLength(n: bigint): number {
+  if (n < 0n) throw new Error("digitLength expects non-negative");
+  if (n === 0n) return 1;
+  let len = 0;
+  let x = n;
+  while (x > 0n) {
+    x /= 10n;
+    len++;
+  }
+  return len;
+}
+
+/** LSD-first digits, zero-padded to `places`. */
+export function toDigits(n: bigint, places: number = ANSWER_DIGITS): Uint8Array {
+  if (n < 0n) throw new Error("toDigits expects non-negative");
+  const out = new Uint8Array(places);
+  let x = n;
+  for (let p = 0; p < places; p++) {
+    out[p] = Number(x % 10n);
+    x /= 10n;
+  }
+  if (x !== 0n) throw new Error(`value ${n} does not fit in ${places} digits`);
+  return out;
+}
+
+/** Recompose LSD-first digits into a bigint. */
+export function fromDigits(digits: ArrayLike<number>, len?: number): bigint {
+  const n = len ?? digits.length;
+  let v = 0n;
+  let place = 1n;
+  for (let p = 0; p < n; p++) {
+    const d = digits[p]! | 0;
+    if (d < 0 || d > 9) throw new Error(`bad digit ${d}`);
+    v += BigInt(d) * place;
+    place *= 10n;
+  }
+  return v;
+}
+
+export function inDomain(a: bigint | number, b: bigint | number): boolean {
+  const aa = typeof a === "bigint" ? a : BigInt(a);
+  const bb = typeof b === "bigint" ? b : BigInt(b);
+  return aa >= 0n && aa <= BigInt(MAX_OPERAND) && bb >= 0n && bb <= BigInt(MAX_OPERAND);
+}
+
+/** True when a value needs more than OPERAND_DIGITS places. */
+export function isBeyondOperandDigits(n: bigint | number): boolean {
+  const v = typeof n === "bigint" ? n : BigInt(Math.trunc(n));
+  return v < 0n || digitLength(v) > OPERAND_DIGITS;
+}
+
+function encodeOperand(x: Float32Array, offset: number, value: bigint): void {
+  if (value < 0n || value > BigInt(MAX_OPERAND)) return;
+  let v = value;
+  for (let place = 0; place < OPERAND_DIGITS; place++) {
+    const dig = Number(v % 10n);
+    x[offset + place * DIGIT_SLOTS + dig] = 1;
+    v /= 10n;
   }
 }
 
 /**
- * Place-value one-hots: tens(a)+ones(a)+op+tens(b)+ones(b).
- * inputDim = 10+10+4+10+10 = 44.
- * Unlike a flat one-hot over 0–99, this shares digit features across numbers
- * (e.g. 23 and 27 share “tens=2”) — still not a true arithmetic algorithm.
+ * Encode place-value features for up to 9-digit operands.
+ * Out-of-range operands leave empty digit slots.
  */
-export const INPUT_DIM = DIGIT_SLOTS + DIGIT_SLOTS + OPS.length + DIGIT_SLOTS + DIGIT_SLOTS;
-
-/** Each expression is 5 place-value “tokens”: a_tens, a_ones, op, b_tens, b_ones. */
-export const TOKENS_PER_EXAMPLE = 5;
-
-export function inDomain(a: number, b: number): boolean {
-  return (
-    Number.isInteger(a) &&
-    Number.isInteger(b) &&
-    a >= 0 &&
-    a <= MAX_OPERAND &&
-    b >= 0 &&
-    b <= MAX_OPERAND
-  );
-}
-
-/** True when a value needs 3+ digits (or is negative / non-integer). */
-export function isThreeDigitOrBeyond(n: number): boolean {
-  return !Number.isInteger(n) || n < 0 || n > MAX_OPERAND;
-}
-
-function encodeOperand(x: Float32Array, offset: number, value: number): void {
-  if (value < 0 || value > MAX_OPERAND) return;
-  const tens = Math.floor(value / 10);
-  const ones = value % 10;
-  x[offset + tens] = 1;
-  x[offset + DIGIT_SLOTS + ones] = 1;
-}
-
-/**
- * Encode place-value features. Out-of-range operands leave empty digit slots —
- * the net never trained on 3-digit numbers, so those predictions are meaningless.
- */
-export function encodeFeatures(a: number, op: Op, b: number): Float32Array {
+export function encodeFeatures(a: bigint | number, op: Op, b: bigint | number): Float32Array {
+  const aa = typeof a === "bigint" ? a : BigInt(a);
+  const bb = typeof b === "bigint" ? b : BigInt(b);
   const x = new Float32Array(INPUT_DIM);
-  encodeOperand(x, 0, a);
-  x[DIGIT_SLOTS * 2 + OPS.indexOf(op)] = 1;
-  encodeOperand(x, DIGIT_SLOTS * 2 + OPS.length, b);
+  encodeOperand(x, 0, aa);
+  x[OPERAND_DIGITS * DIGIT_SLOTS + OPS.indexOf(op)] = 1;
+  encodeOperand(x, OPERAND_DIGITS * DIGIT_SLOTS + OPS.length, bb);
   return x;
 }
 
-export function formatExpr(a: number, op: Op, b: number, answer?: number): string {
+export function formatExpr(
+  a: bigint | number | string,
+  op: Op,
+  b: bigint | number | string,
+  answer?: bigint | number | string,
+): string {
   const sym = op === "*" ? "×" : op === "/" ? "÷" : op === "-" ? "−" : "+";
   const base = `${a} ${sym} ${b}`;
   return answer === undefined ? base : `${base} = ${answer}`;
 }
 
 /** Human-readable description of one training example’s features. */
-export function describeExample(a: number, op: Op, b: number, answer: number): string {
-  const at = Math.floor(a / 10);
-  const ao = a % 10;
-  const bt = Math.floor(b / 10);
-  const bo = b % 10;
-  return `${formatExpr(a, op, b, answer)}  ·  features a=${at}|${ao} op=${op} b=${bt}|${bo}  → class ${answer}`;
+export function describeExample(a: bigint, op: Op, b: bigint, answer: bigint): string {
+  const aDigs = [...toDigits(a, OPERAND_DIGITS)].reverse().join("");
+  const bDigs = [...toDigits(b, OPERAND_DIGITS)].reverse().join("");
+  return `${formatExpr(a, op, b, answer)}  ·  a=${aDigs} op=${op} b=${bDigs}  → ${ANSWER_DIGITS} digit heads`;
 }
 
-/** Fixed curriculum probes — easy + hard (carry / mul) for the smartness scoreboard. */
-export const CURRICULUM: ReadonlyArray<readonly [number, Op, number]> = [
-  [3, "+", 5],
-  [12, "+", 34],
-  [15, "*", 6],
-  [50, "-", 17],
-  [84, "/", 4],
-  [7, "*", 7],
-  [47, "+", 38],
-  [17, "*", 19],
-  [99, "+", 99],
-  [25, "*", 25],
+/** Fixed curriculum probes spanning short → long operands. */
+export const CURRICULUM: ReadonlyArray<readonly [bigint, Op, bigint]> = [
+  [3n, "+", 5n],
+  [12n, "+", 34n],
+  [15n, "*", 6n],
+  [50n, "-", 17n],
+  [84n, "/", 4n],
+  [47n, "+", 38n],
+  [17n, "*", 19n],
+  [999n, "+", 1n],
+  [1234n, "*", 7n],
+  [99999n, "-", 12345n],
+  [123456n, "+", 654321n],
+  [1000000n, "/", 8n],
+  [12345678n, "+", 87654321n],
+  [999999999n, "-", 1n],
+  [123456789n, "+", 987654321n],
+  [111111111n, "*", 2n],
+  [876543210n, "/", 9n],
+  [314159265n, "+", 271828182n],
 ];
 
-export type SampleFilter = (a: number, b: number, op: Op) => boolean;
+export type SampleFilter = (a: bigint, b: bigint, op: Op) => boolean;
 
 /** How often each op appears. Ninja favors mul + carry-heavy add. */
 export type OpMix = Record<Op, number>;
 
 export const BALANCED_MIX: OpMix = { "+": 1, "-": 1, "*": 1, "/": 1 };
 
-/** Empirically better for hard two-digit products / carries. */
-export const NINJA_MIX: OpMix = { "+": 0.28, "-": 0.12, "*": 0.48, "/": 0.12 };
+/** Empirically better for hard products / carries across digit lengths. */
+export const NINJA_MIX: OpMix = { "+": 0.3, "-": 0.12, "*": 0.46, "/": 0.12 };
 
 function pickOp(mix: OpMix): Op {
   const entries = OPS.map((op) => [op, mix[op]] as const);
@@ -124,110 +173,192 @@ function pickOp(mix: OpMix): Op {
   return "*";
 }
 
-/** Ones-digit carry on addition, or both operands ≥10 for mul — harder cases. */
-function isHardCase(a: number, b: number, op: Op): boolean {
-  if (op === "+") return (a % 10) + (b % 10) >= 10;
-  if (op === "*") return a >= 10 && b >= 10 && a * b < NUM_CLASSES;
-  if (op === "-") return a % 10 < b % 10; // borrow
-  return b > 1 && a % b !== 0; // non-trivial div
+/** Uniform random integer in [0, maxInclusive]. */
+function randBigIntInclusive(maxInclusive: bigint): bigint {
+  if (maxInclusive <= 0n) return 0n;
+  if (maxInclusive <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    return BigInt(Math.floor(Math.random() * (Number(maxInclusive) + 1)));
+  }
+  const bits = maxInclusive.toString(2).length;
+  const bytes = Math.ceil(bits / 8);
+  let v = 0n;
+  for (let i = 0; i < bytes; i++) {
+    v = (v << 8n) | BigInt(Math.floor(Math.random() * 256));
+  }
+  return v % (maxInclusive + 1n);
 }
 
-function sampleInRange(
-  filter?: SampleFilter,
-  mix: OpMix = BALANCED_MIX,
-  hardBias = 0,
-): { a: number; op: Op; b: number; answer: number } {
-  for (let attempt = 0; attempt < 120; attempt++) {
-    const preferHard = hardBias > 0 && Math.random() < hardBias;
-    let a = Math.floor(Math.random() * (MAX_OPERAND + 1));
-    let b = Math.floor(Math.random() * (MAX_OPERAND + 1));
-    const op = pickOp(mix);
-    if (preferHard) {
-      if (op === "*") {
-        a = 10 + Math.floor(Math.random() * 90);
-        b = 10 + Math.floor(Math.random() * 90);
-        if (a * b >= NUM_CLASSES) {
-          b = Math.max(10, Math.floor(999 / a));
-        }
-      } else if (op === "+") {
-        const ao = Math.floor(Math.random() * 10);
-        const bo = Math.floor(Math.random() * (10 - ao)) + (9 - ao); // force carry often
-        a = Math.floor(Math.random() * 10) * 10 + ao;
-        b = Math.floor(Math.random() * 10) * 10 + Math.min(9, bo);
-      }
-    }
-    if (filter && !filter(a, b, op)) continue;
-    const answer = computeAnswer(a, op, b);
-    if (answer >= NUM_CLASSES) continue;
-    if (preferHard && !isHardCase(a, b, op) && attempt < 80) continue;
-    return { a, op, b, answer };
-  }
-  // Fallback that always fits class range; still respects filter when possible.
-  for (let a = 0; a <= 20; a++) {
-    for (let b = 0; b <= 20; b++) {
-      const op: Op = "+";
-      if (!filter || filter(a, b, op)) return { a, op, b, answer: a + b };
+/** Random operand with exactly `digits` decimal places (or 0 when digits=1). */
+export function randomOperand(digits: number): bigint {
+  const d = Math.max(1, Math.min(OPERAND_DIGITS, Math.floor(digits)));
+  if (d === 1) return randBigIntInclusive(9n);
+  const lo = 10n ** BigInt(d - 1);
+  const hi = 10n ** BigInt(d) - 1n;
+  return lo + randBigIntInclusive(hi - lo);
+}
+
+/** Random operand with 1..maxDigits places (slight bias toward longer). */
+export function randomOperandUpTo(maxDigits: number): bigint {
+  const m = Math.max(1, Math.min(OPERAND_DIGITS, Math.floor(maxDigits)));
+  let r = Math.random() * ((m * (m + 1)) / 2);
+  let digits = 1;
+  for (let k = 1; k <= m; k++) {
+    r -= k;
+    if (r <= 0) {
+      digits = k;
+      break;
     }
   }
-  return { a: 0, op: "+", b: 0, answer: 0 };
+  if (digits === 1 && Math.random() < 0.15) return 0n;
+  return randomOperand(digits);
+}
+
+function onesDigit(n: bigint): number {
+  return Number(n % 10n);
+}
+
+/** Carry / borrow / multi-digit-mul / non-trivial div hardness. */
+function isHardCase(a: bigint, b: bigint, op: Op): boolean {
+  if (op === "+") return onesDigit(a) + onesDigit(b) >= 10;
+  if (op === "-") return onesDigit(a) < onesDigit(b);
+  if (op === "*") return digitLength(a) >= 2 && digitLength(b) >= 2;
+  return b > 1n && a % b !== 0n;
 }
 
 export type DatasetOptions = {
   filter?: SampleFilter;
-  /** Op sampling weights. */
   mix?: OpMix;
-  /** Probability of forcing a hard (carry / two-digit mul) draw. */
   hardBias?: number;
+  maxDigits?: number;
 };
 
-/** Synthetic arithmetic dataset for pre-training (answer classification). */
+/**
+ * Synthetic arithmetic dataset for pre-training.
+ * Samples across a digit-length curriculum up to nine digits; answers encoded
+ * as 18 LSD-first digit heads (BigInt-safe).
+ */
 export class ArithmeticDataset implements Dataset {
-  readonly name = "synthetic-arithmetic-2digit";
+  readonly name = "synthetic-arithmetic-9digit";
   private readonly filter?: SampleFilter;
   private readonly mix: OpMix;
-  private readonly hardBias: number;
+  private hardBias: number;
+  private maxDigits: number;
 
   constructor(filterOrOpts?: SampleFilter | DatasetOptions) {
     if (typeof filterOrOpts === "function") {
       this.filter = filterOrOpts;
       this.mix = BALANCED_MIX;
       this.hardBias = 0;
+      this.maxDigits = OPERAND_DIGITS;
     } else {
       this.filter = filterOrOpts?.filter;
       this.mix = filterOrOpts?.mix ?? BALANCED_MIX;
       this.hardBias = filterOrOpts?.hardBias ?? 0;
+      this.maxDigits = Math.max(1, Math.min(OPERAND_DIGITS, filterOrOpts?.maxDigits ?? OPERAND_DIGITS));
     }
   }
 
+  setMaxDigits(maxDigits: number): void {
+    this.maxDigits = Math.max(1, Math.min(OPERAND_DIGITS, Math.floor(maxDigits)));
+  }
+
+  getMaxDigits(): number {
+    return this.maxDigits;
+  }
+
+  setHardBias(hardBias: number): void {
+    this.hardBias = hardBias;
+  }
+
   size(): number {
-    // Approximate: most (a,op,b) fit; mul with huge products is resampled away.
-    return (MAX_OPERAND + 1) ** 2 * OPS.length;
+    return Number(10n ** BigInt(this.maxDigits)) ** 2 * OPS.length;
   }
 
   sample(batchSize: number): Batch {
     const inputs = new Float32Array(batchSize * INPUT_DIM);
-    const targets = new Int32Array(batchSize);
+    const digitTargets = new Uint8Array(batchSize * ANSWER_DIGITS);
     const texts: string[] = [];
+    const answers: string[] = [];
 
     for (let i = 0; i < batchSize; i++) {
-      const { a, op, b, answer } = sampleInRange(this.filter, this.mix, this.hardBias);
+      const { a, op, b, answer } = this.sampleOne();
       inputs.set(encodeFeatures(a, op, b), i * INPUT_DIM);
-      targets[i] = answer;
+      digitTargets.set(toDigits(answer, ANSWER_DIGITS), i * ANSWER_DIGITS);
       texts.push(describeExample(a, op, b, answer));
+      answers.push(answer.toString());
     }
 
     return {
       inputs: tensor([batchSize, INPUT_DIM], inputs),
-      targets,
+      digitTargets,
       texts,
+      answers,
     };
+  }
+
+  private sampleOne(): { a: bigint; op: Op; b: bigint; answer: bigint } {
+    const maxD = this.maxDigits;
+    for (let attempt = 0; attempt < 160; attempt++) {
+      const preferHard = this.hardBias > 0 && Math.random() < this.hardBias;
+      const op = pickOp(this.mix);
+      let a = randomOperandUpTo(maxD);
+      let b = randomOperandUpTo(maxD);
+
+      if (preferHard) {
+        if (op === "*") {
+          const da = 1 + Math.floor(Math.random() * maxD);
+          const maxDb = Math.min(maxD, ANSWER_DIGITS - da);
+          const db = Math.max(1, maxDb);
+          a = randomOperand(da);
+          b = randomOperand(Math.min(db, Math.max(1, Math.ceil(da / 2) + Math.floor(Math.random() * db))));
+          if (maxD >= 2 && digitLength(a) === 1) a = randomOperand(2);
+          if (maxD >= 2 && digitLength(b) === 1) b = randomOperand(2);
+        } else if (op === "+") {
+          a = randomOperandUpTo(maxD);
+          b = randomOperandUpTo(maxD);
+          const ao = onesDigit(a);
+          const need = 10 - ao;
+          if (need <= 9) {
+            const bo = need + Math.floor(Math.random() * (10 - need));
+            b = b - BigInt(onesDigit(b)) + BigInt(Math.min(9, bo));
+          }
+        } else if (op === "-") {
+          a = randomOperandUpTo(maxD);
+          b = randomOperandUpTo(Math.min(maxD, digitLength(a)));
+          if (b > a) {
+            const tmp = a;
+            a = b;
+            b = tmp;
+          }
+        } else if (op === "/") {
+          b = randomOperandUpTo(Math.min(maxD, 4));
+          if (b === 0n) b = 1n + randBigIntInclusive(8n);
+          if (Math.random() < 0.55) {
+            const q = randomOperandUpTo(Math.max(1, maxD - digitLength(b) + 1));
+            a = q * b;
+            if (digitLength(a) > maxD) a = randomOperandUpTo(maxD);
+          } else {
+            a = randomOperandUpTo(maxD);
+          }
+        }
+      }
+
+      if (digitLength(a) > maxD || digitLength(b) > maxD) continue;
+      if (this.filter && !this.filter(a, b, op)) continue;
+      const answer = computeAnswer(a, op, b);
+      if (digitLength(answer) > ANSWER_DIGITS) continue;
+      if (preferHard && !isHardCase(a, b, op) && attempt < 100) continue;
+      return { a, op, b, answer };
+    }
+    const a = randomOperand(Math.min(2, maxD));
+    const b = randomOperand(Math.min(2, maxD));
+    return { a, op: "+", b, answer: a + b };
   }
 }
 
 /**
- * Stage-aware pipeline. pretrain / rl → synthetic arithmetic batches
- * (rl rewards are applied in `src/posttrain.ts`, not here).
- * finetune still throws until instruction packs land.
+ * Stage-aware pipeline. pretrain / rl → synthetic arithmetic.
+ * finetune throws until instruction packs are plugged in.
  */
 export class MathDataPipeline implements DataPipeline {
   readonly stage: TrainingStage;
@@ -238,7 +369,6 @@ export class MathDataPipeline implements DataPipeline {
     this.dataset = dataset;
   }
 
-  /** Expose the underlying dataset for UI size estimates. */
   getDataset(): Dataset {
     return this.dataset;
   }
@@ -247,7 +377,6 @@ export class MathDataPipeline implements DataPipeline {
     if (this.stage === "finetune") {
       throw new Error("finetune pipeline not implemented — plug instruction/answer packs here.");
     }
-    // pretrain + rl both draw arithmetic rows; digit-RL shapes the loss in posttrain.
     return this.dataset.sample(batchSize);
   }
 }

@@ -1,21 +1,25 @@
 import type { ForwardResult, Model, Tensor } from "./types";
 import type { MatmulBackend } from "./webgpu";
 import { addBiasInPlace, randn, reluInPlace, softmaxRows, tensor, zeros } from "./tensor";
-import { INPUT_DIM, NUM_CLASSES } from "./data";
+import { ANSWER_DIGITS, INPUT_DIM, fromDigits } from "./data";
 
-export const DEFAULT_HIDDEN = 96;
-/** Digits for hundreds / tens / ones of the answer (0…999). */
+export const DEFAULT_HIDDEN = 256;
+/** Softmax width per answer place. */
 export const DIGIT_CLASSES = 10;
+/** Place embedding width (shared digit head). */
+export const PLACE_DIM = 32;
 
 /**
- * Two-layer place-value MLP: input → ReLU → ReLU → digit heads (H/T/O).
- * Deeper trunk helps hard multiplies where tens digit is the usual failure.
- * Answer = 100·H + 10·T + O; backward uses digit CE (tens weighted slightly higher).
+ * Place-value MLP calculator: input → ReLU → ReLU → shared digit head
+ * conditioned on place embeddings (18 LSD-first answer places).
+ *
+ * Shared head + place emb generalizes across digit lengths better than
+ * independent H/T/O heads once operands stretch to nine digits.
  */
 export class TinyMathMlp implements Model {
-  readonly name = "digit-math-mlp";
+  readonly name = "digit-math-mlp-9";
   readonly inputDim = INPUT_DIM;
-  readonly numClasses = NUM_CLASSES;
+  readonly answerDigits = ANSWER_DIGITS;
   readonly hidden: number;
 
   private readonly gpu: MatmulBackend;
@@ -23,13 +27,11 @@ export class TinyMathMlp implements Model {
   private readonly b1: Tensor;
   private readonly W2: Tensor;
   private readonly b2: Tensor;
-  /** Hundreds / tens / ones heads. */
-  private readonly Wh: Tensor;
-  private readonly bh: Tensor;
-  private readonly Wt: Tensor;
-  private readonly bt: Tensor;
-  private readonly Wo: Tensor;
-  private readonly bo: Tensor;
+  /** [ANSWER_DIGITS, PLACE_DIM] place embeddings. */
+  private readonly placeEmb: Tensor;
+  /** Shared digit head: [H + PLACE_DIM, 10]. */
+  private readonly Wd: Tensor;
+  private readonly bd: Tensor;
 
   constructor(gpu: MatmulBackend, hidden = DEFAULT_HIDDEN) {
     this.gpu = gpu;
@@ -38,20 +40,17 @@ export class TinyMathMlp implements Model {
     this.b1 = zeros([hidden]);
     this.W2 = randn([hidden, hidden], Math.sqrt(2 / hidden));
     this.b2 = zeros([hidden]);
-    const scale = Math.sqrt(2 / hidden);
-    this.Wh = randn([hidden, DIGIT_CLASSES], scale);
-    this.bh = zeros([DIGIT_CLASSES]);
-    this.Wt = randn([hidden, DIGIT_CLASSES], scale);
-    this.bt = zeros([DIGIT_CLASSES]);
-    this.Wo = randn([hidden, DIGIT_CLASSES], scale);
-    this.bo = zeros([DIGIT_CLASSES]);
+    this.placeEmb = randn([ANSWER_DIGITS, PLACE_DIM], 0.02);
+    const inD = hidden + PLACE_DIM;
+    this.Wd = randn([inD, DIGIT_CLASSES], Math.sqrt(2 / inD));
+    this.bd = zeros([DIGIT_CLASSES]);
   }
 
-  /** Parameter count for the two-layer digit-head architecture. */
   static paramCount(hidden: number): number {
     const trunk = INPUT_DIM * hidden + hidden + hidden * hidden + hidden;
-    const head = hidden * DIGIT_CLASSES + DIGIT_CLASSES;
-    return trunk + 3 * head;
+    const place = ANSWER_DIGITS * PLACE_DIM;
+    const head = (hidden + PLACE_DIM) * DIGIT_CLASSES + DIGIT_CLASSES;
+    return trunk + place + head;
   }
 
   weightNorms(): { name: string; l2: number; count: number }[] {
@@ -68,12 +67,9 @@ export class TinyMathMlp implements Model {
       { name: "b1", tensor: this.b1 },
       { name: "W2", tensor: this.W2 },
       { name: "b2", tensor: this.b2 },
-      { name: "Wh", tensor: this.Wh },
-      { name: "bh", tensor: this.bh },
-      { name: "Wt", tensor: this.Wt },
-      { name: "bt", tensor: this.bt },
-      { name: "Wo", tensor: this.Wo },
-      { name: "bo", tensor: this.bo },
+      { name: "placeEmb", tensor: this.placeEmb },
+      { name: "Wd", tensor: this.Wd },
+      { name: "bd", tensor: this.bd },
     ];
   }
 
@@ -98,147 +94,122 @@ export class TinyMathMlp implements Model {
     return { B, h1Pre, h1, h2Pre, h2 };
   }
 
+  /** Digit logits [B, ANSWER_DIGITS * 10] and per-row head inputs [B*ANSWER_DIGITS, H+PLACE_DIM]. */
   private digitLogits(h: Float32Array, B: number): {
-    hundreds: Float32Array;
-    tens: Float32Array;
-    ones: Float32Array;
+    logits: Float32Array;
+    headIn: Float32Array;
   } {
     const H = this.hidden;
-    const hundreds = new Float32Array(B * DIGIT_CLASSES);
-    const tens = new Float32Array(B * DIGIT_CLASSES);
-    const ones = new Float32Array(B * DIGIT_CLASSES);
-    for (let i = 0; i < B; i++) {
-      for (let d = 0; d < DIGIT_CLASSES; d++) {
-        let sh = this.bh.data[d]!;
-        let st = this.bt.data[d]!;
-        let so = this.bo.data[d]!;
-        for (let k = 0; k < H; k++) {
-          const hk = h[i * H + k]!;
-          sh += hk * this.Wh.data[k * DIGIT_CLASSES + d]!;
-          st += hk * this.Wt.data[k * DIGIT_CLASSES + d]!;
-          so += hk * this.Wo.data[k * DIGIT_CLASSES + d]!;
-        }
-        hundreds[i * DIGIT_CLASSES + d] = sh;
-        tens[i * DIGIT_CLASSES + d] = st;
-        ones[i * DIGIT_CLASSES + d] = so;
-      }
-    }
-    return { hundreds, tens, ones };
-  }
+    const inD = H + PLACE_DIM;
+    const logits = new Float32Array(B * ANSWER_DIGITS * DIGIT_CLASSES);
+    const headIn = new Float32Array(B * ANSWER_DIGITS * inD);
 
-  private composeClassLogits(
-    ph: Float32Array,
-    pt: Float32Array,
-    po: Float32Array,
-    B: number,
-  ): Float32Array {
-    const out = new Float32Array(B * NUM_CLASSES);
     for (let i = 0; i < B; i++) {
-      for (let n = 0; n < NUM_CLASSES; n++) {
-        const hd = Math.floor(n / 100);
-        const td = Math.floor(n / 10) % 10;
-        const od = n % 10;
-        const p =
-          ph[i * DIGIT_CLASSES + hd]! *
-          pt[i * DIGIT_CLASSES + td]! *
-          po[i * DIGIT_CLASSES + od]!;
-        out[i * NUM_CLASSES + n] = Math.log(Math.max(p, 1e-12));
+      for (let p = 0; p < ANSWER_DIGITS; p++) {
+        const row = (i * ANSWER_DIGITS + p) * inD;
+        for (let k = 0; k < H; k++) headIn[row + k] = h[i * H + k]!;
+        for (let e = 0; e < PLACE_DIM; e++) {
+          headIn[row + H + e] = this.placeEmb.data[p * PLACE_DIM + e]!;
+        }
+        const outOff = (i * ANSWER_DIGITS + p) * DIGIT_CLASSES;
+        for (let d = 0; d < DIGIT_CLASSES; d++) {
+          let s = this.bd.data[d]!;
+          for (let k = 0; k < inD; k++) {
+            s += headIn[row + k]! * this.Wd.data[k * DIGIT_CLASSES + d]!;
+          }
+          logits[outOff + d] = s;
+        }
       }
     }
-    return out;
+    return { logits, headIn };
   }
 
   async forward(inputs: Tensor): Promise<ForwardResult> {
     const { B, h1Pre, h1, h2Pre, h2 } = await this.trunk(inputs);
-    const { hundreds, tens, ones } = this.digitLogits(h2, B);
-    const ph = softmaxRows(hundreds, B, DIGIT_CLASSES);
-    const pt = softmaxRows(tens, B, DIGIT_CLASSES);
-    const po = softmaxRows(ones, B, DIGIT_CLASSES);
-    const logitsData = this.composeClassLogits(ph, pt, po, B);
+    const { logits, headIn } = this.digitLogits(h2, B);
+    const inD = this.hidden + PLACE_DIM;
 
     return {
-      logits: tensor([B, NUM_CLASSES], logitsData),
+      logits: tensor([B, ANSWER_DIGITS * DIGIT_CLASSES], logits),
       cache: {
         x: inputs,
         h1Pre: tensor([B, this.hidden], h1Pre),
         h1: tensor([B, this.hidden], h1),
         h2Pre: tensor([B, this.hidden], h2Pre),
         h: tensor([B, this.hidden], h2),
-        hundreds: tensor([B, DIGIT_CLASSES], hundreds),
-        tens: tensor([B, DIGIT_CLASSES], tens),
-        ones: tensor([B, DIGIT_CLASSES], ones),
-        logits: tensor([B, NUM_CLASSES], logitsData),
+        headIn: tensor([B * ANSWER_DIGITS, inD], headIn),
+        digitLogits: tensor([B, ANSWER_DIGITS * DIGIT_CLASSES], logits),
       },
     };
   }
 
-  backward(cache: Record<string, Tensor>, targets: Int32Array): Map<string, Tensor> {
+  backward(cache: Record<string, Tensor>, digitTargets: Uint8Array): Map<string, Tensor> {
     const x = cache.x!;
     const h1 = cache.h1!;
     const h1Pre = cache.h1Pre!;
     const h2 = cache.h!;
     const h2Pre = cache.h2Pre!;
-    const hundreds = cache.hundreds!;
-    const tens = cache.tens!;
-    const ones = cache.ones!;
+    const headIn = cache.headIn!;
+    const digitLogits = cache.digitLogits!;
     const [B] = x.shape;
     const H = this.hidden;
+    const inD = H + PLACE_DIM;
+    const rows = B * ANSWER_DIGITS;
 
-    const ph = softmaxRows(hundreds.data, B, DIGIT_CLASSES);
-    const pt = softmaxRows(tens.data, B, DIGIT_CLASSES);
-    const po = softmaxRows(ones.data, B, DIGIT_CLASSES);
+    if (digitTargets.length !== rows) {
+      throw new Error(`digitTargets length ${digitTargets.length} != ${rows}`);
+    }
 
-    const dH2 = new Float32Array(B * H);
-    const dWh = zeros([H, DIGIT_CLASSES]);
-    const dbh = zeros([DIGIT_CLASSES]);
-    const dWt = zeros([H, DIGIT_CLASSES]);
-    const dbt = zeros([DIGIT_CLASSES]);
-    const dWo = zeros([H, DIGIT_CLASSES]);
-    const dbo = zeros([DIGIT_CLASSES]);
-
-    // Tens digit is the usual miss on hard muls (e.g. 47×19 → 813 vs 893).
-    const accumHead = (
-      probs: Float32Array,
-      W: Tensor,
-      dW: Tensor,
-      db: Tensor,
-      digitOf: (t: number) => number,
-      weight: number,
-    ) => {
-      const dLogits = probs.slice();
-      for (let i = 0; i < B; i++) {
-        const dig = digitOf(targets[i]!);
-        dLogits[i * DIGIT_CLASSES + dig]! -= 1;
-      }
-      for (let i = 0; i < dLogits.length; i++) dLogits[i]! = (dLogits[i]! / B) * weight;
-
-      for (let i = 0; i < B; i++) {
-        for (let k = 0; k < H; k++) {
-          const hk = h2.data[i * H + k]!;
-          let back = 0;
-          for (let d = 0; d < DIGIT_CLASSES; d++) {
-            const g = dLogits[i * DIGIT_CLASSES + d]!;
-            dW.data[k * DIGIT_CLASSES + d]! += hk * g;
-            back += g * W.data[k * DIGIT_CLASSES + d]!;
-          }
-          dH2[i * H + k]! += back;
-        }
+    const probs = softmaxRows(digitLogits.data, rows, DIGIT_CLASSES);
+    const dLogits = probs.slice();
+    // Place weights: lower places (carries) slightly heavier; mid mul places matter too.
+    for (let i = 0; i < B; i++) {
+      for (let p = 0; p < ANSWER_DIGITS; p++) {
+        const row = i * ANSWER_DIGITS + p;
+        const dig = digitTargets[row]!;
+        dLogits[row * DIGIT_CLASSES + dig]! -= 1;
+        const w = p < 6 ? 1.25 : p < 12 ? 1.1 : 0.85;
         for (let d = 0; d < DIGIT_CLASSES; d++) {
-          db.data[d]! += dLogits[i * DIGIT_CLASSES + d]!;
+          dLogits[row * DIGIT_CLASSES + d]! = (dLogits[row * DIGIT_CLASSES + d]! / B) * w;
         }
       }
-    };
+    }
 
-    accumHead(ph, this.Wh, dWh, dbh, (t) => Math.floor(t / 100), 1.0);
-    accumHead(pt, this.Wt, dWt, dbt, (t) => Math.floor(t / 10) % 10, 1.35);
-    accumHead(po, this.Wo, dWo, dbo, (t) => t % 10, 1.0);
+    const dWd = zeros([inD, DIGIT_CLASSES]);
+    const dbd = zeros([DIGIT_CLASSES]);
+    const dHeadIn = new Float32Array(rows * inD);
+    const dPlace = zeros([ANSWER_DIGITS, PLACE_DIM]);
+    const dH2 = new Float32Array(B * H);
+
+    for (let row = 0; row < rows; row++) {
+      const p = row % ANSWER_DIGITS;
+      const i = Math.floor(row / ANSWER_DIGITS);
+      for (let k = 0; k < inD; k++) {
+        const hk = headIn.data[row * inD + k]!;
+        let back = 0;
+        for (let d = 0; d < DIGIT_CLASSES; d++) {
+          const g = dLogits[row * DIGIT_CLASSES + d]!;
+          dWd.data[k * DIGIT_CLASSES + d]! += hk * g;
+          back += g * this.Wd.data[k * DIGIT_CLASSES + d]!;
+        }
+        dHeadIn[row * inD + k] = back;
+      }
+      for (let d = 0; d < DIGIT_CLASSES; d++) {
+        dbd.data[d]! += dLogits[row * DIGIT_CLASSES + d]!;
+      }
+      for (let k = 0; k < H; k++) {
+        dH2[i * H + k]! += dHeadIn[row * inD + k]!;
+      }
+      for (let e = 0; e < PLACE_DIM; e++) {
+        dPlace.data[p * PLACE_DIM + e]! += dHeadIn[row * inD + H + e]!;
+      }
+    }
 
     const dH2Pre = dH2.slice();
     for (let i = 0; i < dH2Pre.length; i++) {
       if (h2Pre.data[i]! <= 0) dH2Pre[i] = 0;
     }
 
-    // dW2 = h1^T @ dH2Pre ; dH1 = dH2Pre @ W2^T
     const dW2 = zeros([H, H]);
     const db2 = zeros([H]);
     const dH1 = new Float32Array(B * H);
@@ -270,17 +241,15 @@ export class TinyMathMlp implements Model {
       for (let k = 0; k < H; k++) db1.data[k]! += dH1Pre[i * H + k]!;
     }
 
+    void h2; // kept for API symmetry / future residual hooks
     return new Map([
       ["W1", dW1],
       ["b1", db1],
       ["W2", dW2],
       ["b2", db2],
-      ["Wh", dWh],
-      ["bh", dbh],
-      ["Wt", dWt],
-      ["bt", dbt],
-      ["Wo", dWo],
-      ["bo", dbo],
+      ["placeEmb", dPlace],
+      ["Wd", dWd],
+      ["bd", dbd],
     ]);
   }
 
@@ -292,23 +261,26 @@ export class TinyMathMlp implements Model {
     }
   }
 
-  /** Overwrite parameters from another model's tensors (same hidden size). */
-  loadFrom(other: TinyMathMlp): void {
-    if (other.hidden !== this.hidden) {
-      throw new Error(`hidden mismatch: ${other.hidden} vs ${this.hidden}`);
-    }
-    const src = other.parameters();
-    const dst = this.parameters();
-    for (let i = 0; i < dst.length; i++) {
-      dst[i]!.tensor.data.set(src[i]!.tensor.data);
-    }
-  }
-
-  async predict(features: Float32Array): Promise<{ answer: number; probs: Float32Array }> {
+  async predict(features: Float32Array): Promise<{
+    answer: bigint;
+    digits: number[];
+    digitProbs: Float32Array;
+  }> {
     const { logits } = await this.forward(tensor([1, INPUT_DIM], features));
-    const probs = softmaxRows(logits.data, 1, NUM_CLASSES);
-    let best = 0;
-    for (let i = 1; i < NUM_CLASSES; i++) if (probs[i]! > probs[best]!) best = i;
-    return { answer: best, probs };
+    const probs = softmaxRows(logits.data, ANSWER_DIGITS, DIGIT_CLASSES);
+    const digits: number[] = [];
+    for (let p = 0; p < ANSWER_DIGITS; p++) {
+      let best = 0;
+      let bestV = probs[p * DIGIT_CLASSES]!;
+      for (let d = 1; d < DIGIT_CLASSES; d++) {
+        const v = probs[p * DIGIT_CLASSES + d]!;
+        if (v > bestV) {
+          bestV = v;
+          best = d;
+        }
+      }
+      digits.push(best);
+    }
+    return { answer: fromDigits(digits), digits, digitProbs: probs };
   }
 }

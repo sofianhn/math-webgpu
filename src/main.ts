@@ -1,23 +1,25 @@
 import { WebGpuBackend } from "./webgpu";
 import { DEFAULT_HIDDEN, TinyMathMlp } from "./model";
 import {
+  ANSWER_DIGITS,
   ArithmeticDataset,
   CURRICULUM,
   MAX_OPERAND,
   MathDataPipeline,
   NINJA_MIX,
+  OPERAND_DIGITS,
   OPS,
   TOKENS_PER_EXAMPLE,
   computeAnswer,
   encodeFeatures,
   formatExpr,
   inDomain,
-  isThreeDigitOrBeyond,
+  isBeyondOperandDigits,
   type Op,
 } from "./data";
 import { MathTrainer } from "./trainer";
 import type { TrainMetrics } from "./types";
-import { renderCurves, renderDataFeed, renderNormBars, renderTopK } from "./viz";
+import { renderCurves, renderDataFeed, renderDigitPlaces, renderNormBars } from "./viz";
 import {
   FAIR_HOLDOUT_PCT,
   FAIR_HOLDOUT_SEED,
@@ -37,7 +39,12 @@ import {
   type CheckpointFile,
   type CheckpointId,
 } from "./checkpoint";
-import { describePostTrain, runPostTrain, type DigitRlResult } from "./posttrain";
+import {
+  describePostTrain,
+  runPostTrain,
+  type DigitRlResult,
+  type PostTrainKind,
+} from "./posttrain";
 
 const statusEl = document.querySelector("#status")!;
 const controlsEl = document.querySelector<HTMLElement>("#controls")!;
@@ -78,6 +85,7 @@ const hiddenInput = document.querySelector<HTMLInputElement>("#hidden")!;
 const heldoutInput = document.querySelector<HTMLInputElement>("#heldout")!;
 const rlStepsInput = document.querySelector<HTMLInputElement>("#rl-steps")!;
 const rlLrInput = document.querySelector<HTMLInputElement>("#rl-lr")!;
+const postKindSel = document.querySelector<HTMLSelectElement>("#post-kind")!;
 const aInput = document.querySelector<HTMLInputElement>("#a")!;
 const bInput = document.querySelector<HTMLInputElement>("#b")!;
 
@@ -101,6 +109,16 @@ function formatPpl(p: number): string {
   if (p >= 1e6) return p.toExponential(2);
   if (p >= 1000) return p.toFixed(0);
   return p.toFixed(2);
+}
+
+function parseOperand(raw: string): bigint | null {
+  const s = raw.trim().replace(/[,\s_]/g, "");
+  if (!/^\d+$/.test(s)) return null;
+  try {
+    return BigInt(s);
+  } catch {
+    return null;
+  }
 }
 
 function applyMode(mode: ModePreset) {
@@ -127,33 +145,33 @@ function markCustom() {
 }
 
 function refreshCounts() {
-  const hidden = Math.max(16, Math.min(512, Number(hiddenInput.value) || DEFAULT_HIDDEN));
+  const hidden = Math.max(32, Math.min(768, Number(hiddenInput.value) || DEFAULT_HIDDEN));
   const batch = Math.max(4, Number(batchInput.value) || 64);
-  let examples = Math.max(batch, Number(examplesInput.value) || 2560);
+  let examples = Math.max(batch, Number(examplesInput.value) || 8192);
   examples = Math.max(batch, Math.round(examples / batch) * batch);
   examplesInput.value = String(examples);
   const steps = examples / batch;
   const tokens = examples * TOKENS_PER_EXAMPLE;
   const params = TinyMathMlp.paramCount(hidden);
   const modeTag = activeMode === "custom" ? "custom" : activeMode;
-  paramCountEl.textContent = `Parameters ≈ ${params.toLocaleString()}  · mode=${modeTag}  (digit heads, no flat W2)`;
+  paramCountEl.textContent = `Parameters ≈ ${params.toLocaleString()}  · mode=${modeTag}  (${OPERAND_DIGITS}-digit in · ${ANSWER_DIGITS} heads)`;
   tokenCountEl.textContent = `Tokens / epoch ≈ ${tokens.toLocaleString()}  (${examples.toLocaleString()} examples × ${TOKENS_PER_EXAMPLE} · ${steps} steps × batch ${batch})`;
 }
 
 function paintCkptMeta(ckpt: CheckpointFile) {
   const h = ckpt.hyperparams;
   const hold = ckpt.finalHoldout;
+  const dig = hold.digitAccuracy != null ? ` · digit ${(hold.digitAccuracy * 100).toFixed(1)}%` : "";
   const probes = ckpt.probes
     ? ` · probes easy ${(ckpt.probes.easy * 100).toFixed(0)}% / hard ${(ckpt.probes.hard * 100).toFixed(0)}% / curr ${(ckpt.probes.curriculum * 100).toFixed(0)}%`
     : "";
-  ckptMetaEl.textContent = `Loaded ${ckpt.label}: H=${h.hidden} · ${h.epochs} ep · lr=${h.lr} · ${h.examples.toLocaleString()} ex/ep · batch ${h.batch} · final hold-out ${(hold.accuracy * 100).toFixed(1)}% (n=${hold.n})${probes}`;
+  ckptMetaEl.textContent = `Loaded ${ckpt.label}: H=${h.hidden} · ${h.epochs} ep · curriculum ${h.curriculumStart}→${h.curriculumEnd} digits · final hold-out ${(hold.accuracy * 100).toFixed(1)}%${dig} (n=${hold.n})${probes}`;
 }
 
 async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total: number }> {
   let ok = 0;
   for (const [a, op, b] of CURRICULUM) {
     const truth = computeAnswer(a, op, b);
-    if (truth >= 1000) continue;
     const { answer } = await model.predict(encodeFeatures(a, op, b));
     if (answer === truth) ok++;
   }
@@ -163,7 +181,7 @@ async function curriculumScore(model: TinyMathMlp): Promise<{ ok: number; total:
 async function boot() {
   try {
     const gpu = await WebGpuBackend.create();
-    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Load a <strong>saved</strong> Simple / Mid / Ninja model for instant curves, or Train New. Domain <strong>0–${MAX_OPERAND}</strong>.</p>`;
+    statusEl.innerHTML = `<p><strong>WebGPU ready.</strong> Nine-digit place-value MLP (operands 0–${MAX_OPERAND.toLocaleString()}). Load a saved model or Train New.</p>`;
     controlsEl.hidden = false;
     dataEl.hidden = false;
     internalsEl.hidden = false;
@@ -172,19 +190,20 @@ async function boot() {
     renderCurves(curvesEl, []);
     applyMode(MODE_PRESETS[DEFAULT_MODE]);
 
-    const holdExprs = buildExpressionHoldout(200, FAIR_HOLDOUT_PCT);
+    const holdExprs = buildExpressionHoldout(256, FAIR_HOLDOUT_PCT, OPERAND_DIGITS);
     renderDataFeed(
       holdFeedEl,
       holdExprs.slice(0, 8).map(([a, op, b]) => {
         const ans = computeAnswer(a, op, b);
         return `${formatExpr(a, op, b, ans)}  ·  fair held-out (frozen expression)`;
       }),
-      `Frozen fair held-out bank: ${holdExprs.length} exact expressions (~${FAIR_HOLDOUT_PCT}% slice).`,
+      `Frozen fair held-out bank: ${holdExprs.length} exact expressions (~${FAIR_HOLDOUT_PCT}% slice, lengths 1–${OPERAND_DIGITS}).`,
     );
 
     let model = new TinyMathMlp(gpu, MODE_PRESETS.ninja.hidden);
     const trainer = new MathTrainer();
     let history: TrainMetrics[] = [];
+    let trainDataset: ArithmeticDataset | null = null;
 
     const smoke = await gpu.matmul(
       new Float32Array([1, 2, 3, 4]),
@@ -238,6 +257,8 @@ async function boot() {
         batch: hp.batch,
         mix: hp.mix,
         hardBias: hp.hardBias,
+        curriculumStart: hp.curriculumStart ?? 1,
+        curriculumEnd: hp.curriculumEnd ?? OPERAND_DIGITS,
       });
       model = new TinyMathMlp(gpu, hp.hidden);
       loadWeights(model, ckpt.weights.params);
@@ -250,7 +271,7 @@ async function boot() {
       });
       progressFill.style.width = "100%";
       progressEl.textContent = `Loaded ${ckpt.label} · ${ckpt.curves.length} epochs of curves · hold-out ${(ckpt.finalHoldout.accuracy * 100).toFixed(1)}%`;
-      evalLineEl.textContent = `Saved held-out: perplexity ${formatPpl(ckpt.finalHoldout.perplexity)} · acc ${(ckpt.finalHoldout.accuracy * 100).toFixed(1)}% on ${ckpt.finalHoldout.n} exprs`;
+      evalLineEl.textContent = `Saved held-out: perplexity ${formatPpl(ckpt.finalHoldout.perplexity)} · exact ${(ckpt.finalHoldout.accuracy * 100).toFixed(1)}% · digit ${((ckpt.finalHoldout.digitAccuracy ?? 0) * 100).toFixed(1)}% on ${ckpt.finalHoldout.n} exprs`;
       const score = await curriculumScore(model);
       smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — from saved ${ckpt.label}`;
       normsEl.innerHTML = `<p class="norm-intro">Loaded ${ckpt.arch.paramCount.toLocaleString()} parameters from checkpoint (train from scratch to see before→after norm bars).</p>`;
@@ -302,16 +323,15 @@ async function boot() {
       await paint();
       try {
         let holdSummary = "";
-        // Frozen held-out first — that’s the metric users care about.
         if (heldoutInput.checked) {
           const held = await evaluateModel(model, batchFromExprs(holdExprs));
           log(
-            `eval HOLD       loss=${held.loss.toFixed(4)}  ppl=${formatPpl(held.perplexity)}  acc=${(held.accuracy * 100).toFixed(1)}%  n=${held.n}`,
+            `eval HOLD       loss=${held.loss.toFixed(4)}  ppl=${formatPpl(held.perplexity)}  exact=${(held.accuracy * 100).toFixed(1)}%  digit=${(held.digitAccuracy * 100).toFixed(1)}%  n=${held.n}`,
           );
-          evalLineEl.textContent = `Live held-out: perplexity ${formatPpl(held.perplexity)} · acc ${(held.accuracy * 100).toFixed(1)}% on ${held.n} exprs`;
-          holdSummary = `hold-out ${(held.accuracy * 100).toFixed(1)}% (n=${held.n})`;
+          evalLineEl.textContent = `Live held-out: exact ${(held.accuracy * 100).toFixed(1)}% · digit ${(held.digitAccuracy * 100).toFixed(1)}% · ppl ${formatPpl(held.perplexity)} on ${held.n} exprs`;
+          holdSummary = `hold-out exact ${(held.accuracy * 100).toFixed(1)}% / digit ${(held.digitAccuracy * 100).toFixed(1)}%`;
           setEvalStatus(`Eval: ${holdSummary}…`, "ok");
-          progressEl.textContent = `Eval held-out ${(held.accuracy * 100).toFixed(1)}% · running train-dist…`;
+          progressEl.textContent = `Eval held-out · running train-dist…`;
           await paint();
         }
 
@@ -321,19 +341,19 @@ async function boot() {
             filter: heldoutInput.checked ? (a, b, op) => !isExpressionHeldOut(a, op, b) : undefined,
             mix: NINJA_MIX,
             hardBias: 0.45,
+            maxDigits: OPERAND_DIGITS,
           }),
         );
-        const { loss, accuracy, perplexity } = await trainer.evaluate(model, pipeline, 8);
+        const { loss, accuracy, digitAccuracy, perplexity } = await trainer.evaluate(model, pipeline, 8);
         log(
-          `eval train-dist  loss=${loss.toFixed(4)}  ppl=${formatPpl(perplexity)}  acc=${(accuracy * 100).toFixed(1)}%`,
+          `eval train-dist  loss=${loss.toFixed(4)}  ppl=${formatPpl(perplexity)}  exact=${(accuracy * 100).toFixed(1)}%  digit=${(digitAccuracy * 100).toFixed(1)}%`,
         );
-        const trainSummary = `train-dist ${(accuracy * 100).toFixed(1)}% · ppl ${formatPpl(perplexity)}`;
+        const trainSummary = `train-dist exact ${(accuracy * 100).toFixed(1)}% / digit ${(digitAccuracy * 100).toFixed(1)}%`;
         setEvalStatus(
           holdSummary ? `Eval done: ${holdSummary} · ${trainSummary}` : `Eval done: ${trainSummary}`,
           "ok",
         );
         progressEl.textContent = `Eval done · ${trainSummary}${holdSummary ? ` · ${holdSummary}` : ""}`;
-        // Keep the near-button status in view — do not scroll the log into focus.
         evalStatusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -353,36 +373,30 @@ async function boot() {
       try {
         const epochs = Number(epochsInput.value);
         const batchSize = Math.max(4, Number(batchInput.value) || 64);
-        const examples = Math.max(batchSize, Number(examplesInput.value) || 2560);
+        const examples = Math.max(batchSize, Number(examplesInput.value) || 8192);
         const stepsPerEpoch = Math.max(1, Math.round(examples / batchSize));
         const learningRate = Number(lrInput.value);
-        const hidden = Math.max(16, Math.min(512, Number(hiddenInput.value) || DEFAULT_HIDDEN));
+        const hidden = Math.max(32, Math.min(768, Number(hiddenInput.value) || DEFAULT_HIDDEN));
         hiddenInput.value = String(hidden);
         const useHeldout = heldoutInput.checked;
         const modeLabel = activeMode;
+        const preset =
+          modeLabel === "custom" ? null : MODE_PRESETS[modeLabel as ModeId];
+        const currStart = preset?.curriculumStart ?? 1;
+        const currEnd = preset?.curriculumEnd ?? OPERAND_DIGITS;
 
         const trainFilter = useHeldout
-          ? (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b)
+          ? (a: bigint, b: bigint, op: Op) => !isExpressionHeldOut(a, op, b)
           : undefined;
         const useNinjaMix = modeLabel === "ninja" || modeLabel === "mid" || modeLabel === "custom";
-        const hardBias =
-          modeLabel === "ninja"
-            ? MODE_PRESETS.ninja.hardBias
-            : modeLabel === "mid"
-              ? MODE_PRESETS.mid.hardBias
-              : modeLabel === "simple"
-                ? MODE_PRESETS.simple.hardBias
-                : 0.45;
-        const pipeline = new MathDataPipeline(
-          "pretrain",
-          new ArithmeticDataset({
-            filter: trainFilter,
-            mix: useNinjaMix
-              ? NINJA_MIX
-              : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
-            hardBias,
-          }),
-        );
+        const hardBias = preset?.hardBias ?? 0.45;
+        trainDataset = new ArithmeticDataset({
+          filter: trainFilter,
+          mix: useNinjaMix ? NINJA_MIX : { "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 },
+          hardBias,
+          maxDigits: currStart,
+        });
+        const pipeline = new MathDataPipeline("pretrain", trainDataset);
         const heldoutBatch = useHeldout ? batchFromExprs(holdExprs) : undefined;
 
         model = new TinyMathMlp(gpu, hidden);
@@ -398,10 +412,10 @@ async function boot() {
         const fb0 = gpu.cpuFallbackCount;
 
         log(
-          `Train New [${modeLabel}] — digit heads · H=${hidden} (~${TinyMathMlp.paramCount(hidden).toLocaleString()} params) · ${examples}/epoch · ${stepsPerEpoch} steps × batch ${batchSize} · ~${(examples * TOKENS_PER_EXAMPLE).toLocaleString()} tokens/epoch · lr=${learningRate} · held-out=${useHeldout ? `fair ~${FAIR_HOLDOUT_PCT}%` : "off"}`,
+          `Train New [${modeLabel}] — ${OPERAND_DIGITS}-digit place MLP · H=${hidden} (~${TinyMathMlp.paramCount(hidden).toLocaleString()} params) · curriculum ${currStart}→${currEnd} · ${examples}/epoch · lr=${learningRate}`,
         );
         if (modeLabel === "ninja") {
-          log("Ninja can take a few minutes on phones — that’s the strong-math setting.");
+          log("Ninja nine-digit curriculum can take a while — that’s the strong-math setting.");
         }
         await paint();
 
@@ -413,21 +427,24 @@ async function boot() {
           stepsPerEpoch,
           tokensPerExample: TOKENS_PER_EXAMPLE,
           heldoutBatch,
+          curriculumStartDigits: currStart,
+          curriculumEndDigits: currEnd,
+          onCurriculumDigits: (d) => trainDataset?.setMaxDigits(d),
           onMetrics: async (m) => {
             history.push(m);
             progressFill.style.width = `${((m.epoch / epochs) * 100).toFixed(1)}%`;
-            progressEl.textContent = `Epoch ${m.epoch}/${epochs} · train loss ${m.loss.toFixed(3)} · ppl ${formatPpl(m.perplexity)} · acc ${(m.accuracy * 100).toFixed(1)}% · ${m.tokens.toLocaleString()} tokens`;
-            let line = `epoch ${String(m.epoch).padStart(3)}  loss=${m.loss.toFixed(4)}  ppl=${formatPpl(m.perplexity)}  acc=${(m.accuracy * 100).toFixed(1)}%`;
+            progressEl.textContent = `Epoch ${m.epoch}/${epochs} · maxDigits=${m.maxDigits} · loss ${m.loss.toFixed(3)} · exact ${(m.accuracy * 100).toFixed(1)}% · digit ${(m.digitAccuracy * 100).toFixed(1)}%`;
+            let line = `epoch ${String(m.epoch).padStart(3)}  d=${m.maxDigits}  loss=${m.loss.toFixed(4)}  exact=${(m.accuracy * 100).toFixed(1)}%  digit=${(m.digitAccuracy * 100).toFixed(1)}%`;
             if (m.heldout) {
-              line += `  |  HOLD loss=${m.heldout.loss.toFixed(4)}  ppl=${formatPpl(m.heldout.perplexity)}  acc=${(m.heldout.accuracy * 100).toFixed(1)}%`;
-              evalLineEl.textContent = `Held-out (unseen exprs): perplexity ${formatPpl(m.heldout.perplexity)} · acc ${(m.heldout.accuracy * 100).toFixed(1)}% on ${m.heldout.n} exprs`;
+              line += `  |  HOLD exact=${(m.heldout.accuracy * 100).toFixed(1)}%  digit=${(m.heldout.digitAccuracy * 100).toFixed(1)}%`;
+              evalLineEl.textContent = `Held-out: exact ${(m.heldout.accuracy * 100).toFixed(1)}% · digit ${(m.heldout.digitAccuracy * 100).toFixed(1)}% on ${m.heldout.n} exprs`;
             }
             log(line);
             renderCurves(curvesEl, history, {
-              title: `${modeLabel} · H=${hidden} · ${examples} ex/ep · lr=${learningRate}`,
+              title: `${modeLabel} · H=${hidden} · curr ${currStart}→${currEnd}`,
             });
             const live = pipeline.nextBatch(6);
-            renderDataFeed(dataFeedEl, live.texts ?? [], `Live train sample @ epoch ${m.epoch}:`);
+            renderDataFeed(dataFeedEl, live.texts ?? [], `Live train sample @ epoch ${m.epoch} (maxDigits=${m.maxDigits}):`);
             if (m.epoch === epochs || m.epoch % Math.max(1, Math.floor(epochs / 5)) === 0) {
               const score = await curriculumScore(model);
               smartnessEl.textContent = `Curriculum @ epoch ${m.epoch}: ${score.ok}/${score.total} (${(
@@ -441,22 +458,20 @@ async function boot() {
 
         renderNormBars(normsEl, beforeNorms, model.weightNorms());
         const score = await curriculumScore(model);
-        smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — compare held-out acc.`;
-        progressEl.textContent = `Done [${modeLabel}] · ${epochs} epochs · final train ppl ${formatPpl(history.at(-1)?.perplexity ?? NaN)}`;
+        smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — compare held-out exact.`;
+        progressEl.textContent = `Done [${modeLabel}] · ${epochs} epochs · final exact ${(history.at(-1)?.accuracy ?? 0) * 100 | 0}%`;
         progressFill.style.width = "100%";
         modelReady = true;
         const fb = gpu.cpuFallbackCount - fb0;
         log(`Train New finished.${fb ? ` (CPU matmul fallback ${fb}×)` : ""}`);
 
-        const holdProbe =
-          holdExprs.find(([a, op, b]) => op === "+" && computeAnswer(a, op, b) < 1000) ?? holdExprs[0];
-        const probes: Array<readonly [number, Op, number]> = [
-          [12, "+", 34],
-          [47, "+", 38],
-          [17, "*", 19],
-          [47, "*", 19],
-          [25, "*", 25],
-          holdProbe ?? [58, "+", 67],
+        const probes: Array<readonly [bigint, Op, bigint]> = [
+          [12n, "+", 34n],
+          [47n, "*", 19n],
+          [123456789n, "+", 987654321n],
+          [999999999n, "-", 1n],
+          [111111111n, "*", 2n],
+          holdExprs[0] ?? [58n, "+", 67n],
         ];
         for (const [a, op, b] of probes) {
           const truth = computeAnswer(a, op, b);
@@ -468,7 +483,6 @@ async function boot() {
         const message = err instanceof Error ? err.message : String(err);
         log(`Train New failed: ${message}`);
         setEvalStatus(`Train failed: ${message}`, "error");
-        // Keep whatever weights exist if training aborted mid-run.
         modelReady = history.length > 0;
       } finally {
         setBusy(false);
@@ -480,35 +494,33 @@ async function boot() {
         predictionEl.textContent = "Load a saved model or Train New first.";
         return;
       }
-      const a = Number(aInput.value);
-      const b = Number(bInput.value);
+      const a = parseOperand(aInput.value);
+      const b = parseOperand(bInput.value);
       const op = (document.querySelector("#op") as HTMLSelectElement).value as Op;
-      if (!OPS.includes(op)) return;
+      if (a === null || b === null || !OPS.includes(op)) {
+        oodEl.hidden = false;
+        oodEl.textContent = "Enter non-negative integers (up to 9 digits each).";
+        return;
+      }
 
       if (!inDomain(a, b)) {
         oodEl.hidden = false;
-        const offender = isThreeDigitOrBeyond(a) ? a : b;
-        oodEl.textContent = `${formatExpr(a, op, b)} is OOD (need 0–${MAX_OPERAND}). ${offender} is outside the two-digit encoder.`;
+        const offender = isBeyondOperandDigits(a) ? a : b;
+        oodEl.textContent = `${formatExpr(a, op, b)} is OOD (need 0–${MAX_OPERAND}). ${offender} needs more than ${OPERAND_DIGITS} digits.`;
         predictionEl.textContent = "";
         topkEl.innerHTML = "";
         return;
       }
       oodEl.hidden = true;
       const truth = computeAnswer(a, op, b);
-      if (truth >= 1000) {
-        oodEl.hidden = false;
-        oodEl.textContent = `Truth ${truth} exceeds 1000 answer classes.`;
-        return;
-      }
-      const { answer, probs } = await model.predict(encodeFeatures(a, op, b));
+      const { answer, digits, digitProbs } = await model.predict(encodeFeatures(a, op, b));
       const tag = isExpressionHeldOut(a, op, b) ? " [fair held-out]" : "";
       predictionEl.textContent = `${formatExpr(a, op, b)} → model says ${answer} (truth ${truth})${
         answer === truth ? " ✓" : " ✗"
       }${tag}`;
-      renderTopK(topkEl, probs, 5);
+      renderDigitPlaces(topkEl, digitProbs, digits);
     };
 
-    // Wire controls before auto-load so Run Eval / Train New never sit enabled without handlers.
     document.querySelectorAll<HTMLButtonElement>("[data-ckpt]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const key = btn.dataset.ckpt as ModeId;
@@ -540,6 +552,7 @@ async function boot() {
     const buildPostRlCheckpoint = (result: DigitRlResult): CheckpointFile => {
       const baseId = (loadedCkpt?.id ?? (activeMode === "custom" ? DEFAULT_MODE : activeMode)) as CheckpointId;
       const baseLabel = loadedCkpt?.label ?? MODE_PRESETS[baseId]?.label ?? String(baseId);
+      const preset = MODE_PRESETS[baseId];
       const hp = loadedCkpt?.hyperparams ?? {
         hidden: model.hidden,
         epochs: Number(epochsInput.value) || 0,
@@ -547,13 +560,17 @@ async function boot() {
         examples: Number(examplesInput.value) || 0,
         batch: Number(batchInput.value) || 64,
         mix: baseId === "simple" ? ("simple" as const) : ("ninja" as const),
-        hardBias: MODE_PRESETS[baseId]?.hardBias ?? 0.45,
+        hardBias: preset?.hardBias ?? 0.45,
         heldout: heldoutInput.checked,
+        curriculumStart: preset?.curriculumStart ?? 1,
+        curriculumEnd: preset?.curriculumEnd ?? OPERAND_DIGITS,
+        operandDigits: OPERAND_DIGITS,
+        answerDigits: ANSWER_DIGITS,
       };
       const meta = buildCheckpointMeta({
         id: baseId,
-        label: `${baseLabel} + digit RL`,
-        blurb: `Digit RL (${result.steps} steps) on ${baseLabel}. Hold-out ${formatPct(result.beforeHoldout.accuracy)} → ${formatPct(result.afterHoldout.accuracy)} (${formatDelta(result.holdoutDelta)}). ${describePostTrain("digit-rl")}`,
+        label: `${baseLabel} + ${result.kind}`,
+        blurb: `${result.kind} (${result.steps} steps) on ${baseLabel}. Hold-out ${formatPct(result.beforeHoldout.accuracy)} → ${formatPct(result.afterHoldout.accuracy)} (${formatDelta(result.holdoutDelta)}). ${describePostTrain(result.kind)}`,
         hyperparams: hp,
         holdout: {
           pct: FAIR_HOLDOUT_PCT,
@@ -567,7 +584,7 @@ async function boot() {
       });
       const ckpt = packCheckpoint(meta, model);
       ckpt.postTrain = {
-        kind: "digit-rl",
+        kind: result.kind,
         steps: result.steps,
         meanReward: result.meanReward,
         beforeHoldout: result.beforeHoldout,
@@ -580,38 +597,40 @@ async function boot() {
 
     const runDigitRlUi = async () => {
       if (!modelReady) {
-        setRlStatus("Load a saved model (or finish Train New) before Digit RL.", "error");
+        setRlStatus("Load a saved model (or finish Train New) before post-train.", "error");
         return;
       }
+      const kind = postKindSel.value as PostTrainKind;
       setBusy(true);
-      setRlStatus("Digit RL: measuring hold-out before…");
+      setRlStatus(`${kind}: measuring hold-out before…`);
       rlDeltaEl.textContent = "";
       postRlCkpt = null;
       lastRlResult = null;
       await paint();
       const steps = Math.max(5, Math.min(400, Number(rlStepsInput.value) || 80));
-      const rlLr = Math.max(0.0001, Number(rlLrInput.value) || 0.0015);
+      const rlLr = Math.max(0.0001, Number(rlLrInput.value) || 0.001);
       rlStepsInput.value = String(steps);
       rlLrInput.value = String(rlLr);
       const beforeNorms = model.weightNorms();
       log(
-        `Digit RL — ${describePostTrain("digit-rl")} · steps=${steps} · lr=${rlLr} · held-out bank n=${holdExprs.length}`,
+        `Post-train ${kind} — ${describePostTrain(kind)} · steps=${steps} · lr=${rlLr} · held-out bank n=${holdExprs.length}`,
       );
       try {
         const result = await runPostTrain(model, {
-          kind: "digit-rl",
+          kind,
           steps,
           learningRate: rlLr,
           holdoutExprs: holdExprs,
+          maxDigits: OPERAND_DIGITS,
           onStep: async (m) => {
             progressFill.style.width = `${((m.step / m.steps) * 100).toFixed(1)}%`;
-            progressEl.textContent = `Digit RL ${m.step}/${m.steps} · reward ${m.meanReward.toFixed(3)} · digit-acc ${(m.meanDigitAcc * 100).toFixed(1)}% · exact ${(m.exactRate * 100).toFixed(1)}%`;
+            progressEl.textContent = `${kind} ${m.step}/${m.steps} · reward ${m.meanReward.toFixed(3)} · digit-acc ${(m.meanDigitAcc * 100).toFixed(1)}% · exact ${(m.exactRate * 100).toFixed(1)}%`;
             setRlStatus(
-              `RL step ${m.step}/${m.steps}: reward ${m.meanReward.toFixed(3)} · greedy digits ${(m.greedyDigitAcc * 100).toFixed(1)}%`,
+              `${kind} step ${m.step}/${m.steps}: reward ${m.meanReward.toFixed(3)} · greedy digits ${(m.greedyDigitAcc * 100).toFixed(1)}%`,
             );
             if (m.step === m.steps || m.step % Math.max(1, Math.floor(m.steps / 6)) === 0) {
               log(
-                `rl ${String(m.step).padStart(3)}  reward=${m.meanReward.toFixed(4)}  digit=${(m.meanDigitAcc * 100).toFixed(1)}%  exact=${(m.exactRate * 100).toFixed(1)}%  adv=${m.meanAdvantage.toFixed(4)}`,
+                `pt ${String(m.step).padStart(3)}  reward=${m.meanReward.toFixed(4)}  digit=${(m.meanDigitAcc * 100).toFixed(1)}%  exact=${(m.exactRate * 100).toFixed(1)}%`,
               );
               await paint();
             }
@@ -624,21 +643,21 @@ async function boot() {
         const after = formatPct(result.afterHoldout.accuracy);
         const delta = formatDelta(result.holdoutDelta);
         rlDeltaEl.textContent = `Hold-out before ${before} → after ${after} (${delta}) · n=${result.afterHoldout.n}`;
-        evalLineEl.textContent = `After digit RL: hold-out ${after} (was ${before}, ${delta}) on ${result.afterHoldout.n} exprs`;
-        setRlStatus(`Digit RL done · mean reward ${result.meanReward.toFixed(3)} · ${delta} hold-out`, "ok");
-        progressEl.textContent = `Digit RL done · hold-out ${before} → ${after}`;
+        evalLineEl.textContent = `After ${kind}: hold-out ${after} (was ${before}, ${delta}) on ${result.afterHoldout.n} exprs`;
+        setRlStatus(`${kind} done · mean reward ${result.meanReward.toFixed(3)} · ${delta} hold-out`, "ok");
+        progressEl.textContent = `${kind} done · hold-out ${before} → ${after}`;
         progressFill.style.width = "100%";
         ckptMetaEl.textContent = `${postRlCkpt.label}: hold-out ${before} → ${after} (${delta}). Hit Save checkpoint to download JSON.`;
         log(
-          `Digit RL finished: HOLD ${before} → ${after} (${delta}) · mean reward ${result.meanReward.toFixed(4)}`,
+          `${kind} finished: HOLD ${before} → ${after} (${delta}) · mean reward ${result.meanReward.toFixed(4)}`,
         );
         const score = await curriculumScore(model);
-        smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — after digit RL`;
+        smartnessEl.textContent = `Curriculum ${score.ok}/${score.total} (${((score.ok / score.total) * 100).toFixed(0)}%) — after ${kind}`;
         rlStatusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        setRlStatus(`Digit RL failed: ${message}`, "error");
-        log(`Digit RL failed: ${message}`);
+        setRlStatus(`Post-train failed: ${message}`, "error");
+        log(`Post-train failed: ${message}`);
       } finally {
         setBusy(false);
       }
@@ -646,10 +665,10 @@ async function boot() {
 
     const savePostRlCheckpoint = () => {
       if (!postRlCkpt) {
-        setRlStatus("Run Digit RL first, then Save checkpoint.", "error");
+        setRlStatus("Run post-train first, then Save checkpoint.", "error");
         return;
       }
-      const fname = `${postRlCkpt.id}-digit-rl-checkpoint.json`;
+      const fname = `${postRlCkpt.id}-${postRlCkpt.postTrain?.kind ?? "post"}-checkpoint.json`;
       downloadCheckpoint(postRlCkpt, fname);
       setRlStatus(`Saved ${fname} (${postRlCkpt.arch.paramCount.toLocaleString()} params).`, "ok");
       log(`Downloaded ${fname}`);
@@ -658,18 +677,22 @@ async function boot() {
     digitRlBtn.addEventListener("click", () => void runDigitRlUi());
     saveCkptBtn.addEventListener("click", () => savePostRlCheckpoint());
 
-    const previewFilter = (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b);
+    const previewFilter = (a: bigint, b: bigint, op: Op) => !isExpressionHeldOut(a, op, b);
     const previewPipe = new MathDataPipeline(
       "pretrain",
-      new ArithmeticDataset({ filter: previewFilter, mix: NINJA_MIX, hardBias: 0.45 }),
+      new ArithmeticDataset({
+        filter: previewFilter,
+        mix: NINJA_MIX,
+        hardBias: 0.45,
+        maxDigits: 4,
+      }),
     );
     renderDataFeed(
       dataFeedEl,
       previewPipe.nextBatch(6).texts ?? [],
-      "Preview of train-distribution rows (Ninja mix favors × / carries; fair held-out excluded):",
+      "Preview of train-distribution rows (curriculum sample @ 4 digits; fair held-out excluded):",
     );
 
-    // Auto-load default Ninja checkpoint when present (handlers already wired).
     await loadSelected();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

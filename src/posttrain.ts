@@ -1,20 +1,22 @@
 /**
  * Post-training without English chain-of-thought.
  *
- * The MLP has no language channel — only place-value features → digit heads.
- * Digit RL samples H/T/O from the policy, scores digit-wise correctness
- * (+ exact-match bonus), and updates with self-critical REINFORCE (sample
- * vs greedy baseline), plus a light CE mix toward the true answer so a
- * strong pretrained checkpoint is not destroyed.
+ * Digit RL — sample answer digits, reward digit-wise correctness (+ exact bonus),
+ * self-critical REINFORCE vs greedy baseline, light CE mix.
+ * DPO-digits — prefer true digit sequence over a near-miss corruption.
+ * Self-consistency — temperature sample + majority vote at inference (no update).
  */
 import type { DataPipeline, Model, Tensor, TrainingStage } from "./types";
 import { DIGIT_CLASSES, TinyMathMlp } from "./model";
-import { softmaxRows } from "./tensor";
+import { softmaxRows, tensor } from "./tensor";
 import {
+  ANSWER_DIGITS,
   ArithmeticDataset,
   MathDataPipeline,
   NINJA_MIX,
+  OPERAND_DIGITS,
   TOKENS_PER_EXAMPLE,
+  fromDigits,
   type Op,
 } from "./data";
 import {
@@ -36,15 +38,17 @@ export interface PostTrainConfig {
   batchSize?: number;
   /** Softmax temperature for digit sampling (1 = raw probs). */
   temperature?: number;
-  /** Extra reward when all three digits match. */
+  /** Extra reward when all answer digits match. */
   exactBonus?: number;
-  /** Fraction of CE-toward-truth mixed into each step (0 = pure REINFORCE). */
+  /** Fraction of CE-toward-truth mixed into each RL step. */
   ceMix?: number;
-  /** Op mix hard-bias for RL batches (favor harder arithmetic). */
+  /** DPO β temperature. */
+  dpoBeta?: number;
+  /** Self-consistency sample count. */
+  voteSamples?: number;
   hardBias?: number;
-  /** Exclude fair held-out expressions from RL batches (default true). */
+  maxDigits?: number;
   excludeHoldout?: boolean;
-  /** Optional frozen bank for before/after eval. */
   holdoutExprs?: HoldoutExpr[];
   onStep?: (m: DigitRlStepMetrics) => void | Promise<void>;
 }
@@ -58,10 +62,11 @@ export interface DigitRlStepMetrics {
   greedyDigitAcc: number;
   baseline: number;
   meanAdvantage: number;
+  kind?: PostTrainKind;
 }
 
 export interface DigitRlResult {
-  kind: "digit-rl";
+  kind: PostTrainKind;
   steps: number;
   history: DigitRlStepMetrics[];
   beforeHoldout: EvalReport;
@@ -73,7 +78,7 @@ export interface DigitRlResult {
 export function describePostTrain(kind: PostTrainKind): string {
   switch (kind) {
     case "digit-rl":
-      return "Reward exact (or digit-wise) correctness — no English needed.";
+      return "Reward exact (or digit-wise) correctness across 18 answer places — no English needed.";
     case "dpo-digits":
       return "Prefer correct answer digits over near-misses for the same expression.";
     case "self-consistency":
@@ -117,21 +122,19 @@ function sampleDigit(probs: Float32Array, offset: number, temperature: number): 
   return DIGIT_CLASSES - 1;
 }
 
-/** Digit-wise reward in [0, 1 + exactBonus]. */
-export function digitReward(
-  pred: number,
-  truth: number,
+/** Digit-wise reward in [0, 1 + exactBonus] over ANSWER_DIGITS places. */
+export function digitRewardFromTargets(
+  pred: Uint8Array | ArrayLike<number>,
+  truth: Uint8Array | ArrayLike<number>,
+  places = ANSWER_DIGITS,
   exactBonus = 0.5,
 ): { reward: number; digitAcc: number; exact: boolean } {
-  const ph = Math.floor(pred / 100);
-  const pt = Math.floor(pred / 10) % 10;
-  const po = pred % 10;
-  const th = Math.floor(truth / 100);
-  const tt = Math.floor(truth / 10) % 10;
-  const to = truth % 10;
-  const hits = (ph === th ? 1 : 0) + (pt === tt ? 1 : 0) + (po === to ? 1 : 0);
-  const digitAcc = hits / 3;
-  const exact = pred === truth;
+  let hits = 0;
+  for (let p = 0; p < places; p++) {
+    if (pred[p] === truth[p]) hits++;
+  }
+  const digitAcc = hits / places;
+  const exact = hits === places;
   return { reward: digitAcc + (exact ? exactBonus : 0), digitAcc, exact };
 }
 
@@ -188,19 +191,26 @@ function adamStep(
   }
 }
 
-function rlPipeline(excludeHoldout: boolean, hardBias: number): DataPipeline {
+function rlPipeline(
+  excludeHoldout: boolean,
+  hardBias: number,
+  maxDigits: number,
+): DataPipeline {
   const filter = excludeHoldout
-    ? (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b)
+    ? (a: bigint, b: bigint, op: Op) => !isExpressionHeldOut(a, op, b)
     : undefined;
   return new MathDataPipeline(
     "rl",
-    new ArithmeticDataset({ filter, mix: NINJA_MIX, hardBias }),
+    new ArithmeticDataset({ filter, mix: NINJA_MIX, hardBias, maxDigits }),
   );
+}
+
+function sliceDigits(src: Uint8Array, i: number, places: number): Uint8Array {
+  return src.subarray(i * places, (i + 1) * places);
 }
 
 /**
  * Self-critical digit RL on a loaded model.
- * Returns hold-out metrics before and after the update loop.
  */
 export async function runDigitRl(
   model: TinyMathMlp,
@@ -208,14 +218,17 @@ export async function runDigitRl(
 ): Promise<DigitRlResult> {
   const steps = Math.max(1, config.steps ?? 80);
   const batchSize = Math.max(4, config.batchSize ?? 32);
-  const learningRate = config.learningRate ?? 0.0015;
+  const learningRate = config.learningRate ?? 0.001;
   const temperature = config.temperature ?? 1.0;
   const exactBonus = config.exactBonus ?? 0.5;
   const ceMix = Math.min(0.9, Math.max(0, config.ceMix ?? 0.35));
   const hardBias = config.hardBias ?? 0.55;
+  const maxDigits = config.maxDigits ?? OPERAND_DIGITS;
   const excludeHoldout = config.excludeHoldout !== false;
-  const holdExprs = config.holdoutExprs ?? buildExpressionHoldout(200, FAIR_HOLDOUT_PCT);
-  const pipeline = rlPipeline(excludeHoldout, hardBias);
+  const holdExprs =
+    config.holdoutExprs ?? buildExpressionHoldout(256, FAIR_HOLDOUT_PCT, maxDigits);
+  const pipeline = rlPipeline(excludeHoldout, hardBias, maxDigits);
+  const places = model.answerDigits;
 
   const beforeHoldout = await evaluateModel(model, batchFromExprs(holdExprs));
 
@@ -228,17 +241,11 @@ export async function runDigitRl(
 
   for (let step = 1; step <= steps; step++) {
     const batch = pipeline.nextBatch(batchSize);
-    const { cache } = await model.forward(batch.inputs);
-    const B = batch.targets.length;
-    const hundreds = cache.hundreds!;
-    const tens = cache.tens!;
-    const ones = cache.ones!;
+    const { cache, logits } = await model.forward(batch.inputs);
+    const B = batchSize;
+    const probs = softmaxRows(logits.data, B * places, DIGIT_CLASSES);
 
-    const ph = softmaxRows(hundreds.data, B, DIGIT_CLASSES);
-    const pt = softmaxRows(tens.data, B, DIGIT_CLASSES);
-    const po = softmaxRows(ones.data, B, DIGIT_CLASSES);
-
-    const sampledTargets = new Int32Array(B);
+    const sampledTargets = new Uint8Array(B * places);
     let rewardAcc = 0;
     let digitAccAcc = 0;
     let exactAcc = 0;
@@ -246,19 +253,17 @@ export async function runDigitRl(
     let advAcc = 0;
 
     for (let i = 0; i < B; i++) {
-      const truth = batch.targets[i]!;
-      const off = i * DIGIT_CLASSES;
-      const greedyAns =
-        argmaxDigit(ph, off) * 100 + argmaxDigit(pt, off) * 10 + argmaxDigit(po, off);
-      const greedyR = digitReward(greedyAns, truth, exactBonus);
-
-      const sampleAns =
-        sampleDigit(ph, off, temperature) * 100 +
-        sampleDigit(pt, off, temperature) * 10 +
-        sampleDigit(po, off, temperature);
-      const sampleR = digitReward(sampleAns, truth, exactBonus);
-
-      sampledTargets[i] = sampleAns;
+      const truth = sliceDigits(batch.digitTargets, i, places);
+      const greedy = new Uint8Array(places);
+      const sampled = new Uint8Array(places);
+      for (let p = 0; p < places; p++) {
+        const off = (i * places + p) * DIGIT_CLASSES;
+        greedy[p] = argmaxDigit(probs, off);
+        sampled[p] = sampleDigit(probs, off, temperature);
+      }
+      sampledTargets.set(sampled, i * places);
+      const greedyR = digitRewardFromTargets(greedy, truth, places, exactBonus);
+      const sampleR = digitRewardFromTargets(sampled, truth, places, exactBonus);
       advAcc += sampleR.reward - greedyR.reward;
       rewardAcc += sampleR.reward;
       digitAccAcc += sampleR.digitAcc;
@@ -271,12 +276,10 @@ export async function runDigitRl(
     baseline = 0.9 * baseline + 0.1 * meanReward;
     rewardSum += meanReward;
 
-    // REINFORCE: CE(sample) grads increase π(sample). Descend (−meanAdv)·CE
-    // ≡ ascend meanAdv·log π(sample). Mix CE(truth) so pretrained quality holds.
     const combined = new Map<string, Tensor>();
     addGrads(combined, model.backward(cache, sampledTargets), -meanAdv);
     if (ceMix > 0) {
-      addGrads(combined, model.backward(cache, batch.targets), ceMix);
+      addGrads(combined, model.backward(cache, batch.digitTargets), ceMix);
     }
 
     if (gradsNonZero(combined)) {
@@ -293,6 +296,7 @@ export async function runDigitRl(
       greedyDigitAcc: greedyDigitAccAcc / B,
       baseline,
       meanAdvantage: meanAdv,
+      kind: "digit-rl",
     };
     history.push(metrics);
     await config.onStep?.(metrics);
@@ -311,22 +315,149 @@ export async function runDigitRl(
 }
 
 /**
- * Entry point for UI / blog. Currently implements digit-rl only;
- * other kinds throw with a descriptive message.
+ * DPO-style preference on digit sequences: chosen = truth, rejected = one-digit flip.
+ * Uses CE(chosen) − CE(rejected) as a surrogate preference gradient.
  */
+export async function runDpoDigits(
+  model: TinyMathMlp,
+  config: Omit<PostTrainConfig, "kind"> = {},
+): Promise<DigitRlResult> {
+  const steps = Math.max(1, config.steps ?? 60);
+  const batchSize = Math.max(4, config.batchSize ?? 32);
+  const learningRate = config.learningRate ?? 0.0008;
+  const hardBias = config.hardBias ?? 0.5;
+  const maxDigits = config.maxDigits ?? OPERAND_DIGITS;
+  const excludeHoldout = config.excludeHoldout !== false;
+  const holdExprs =
+    config.holdoutExprs ?? buildExpressionHoldout(256, FAIR_HOLDOUT_PCT, maxDigits);
+  const pipeline = rlPipeline(excludeHoldout, hardBias, maxDigits);
+  const places = model.answerDigits;
+
+  const beforeHoldout = await evaluateModel(model, batchFromExprs(holdExprs));
+  const history: DigitRlStepMetrics[] = [];
+  const m = new Map<string, Float32Array>();
+  const v = new Map<string, Float32Array>();
+  let tAdam = 0;
+  let rewardSum = 0;
+
+  for (let step = 1; step <= steps; step++) {
+    const batch = pipeline.nextBatch(batchSize);
+    const { cache, logits } = await model.forward(batch.inputs);
+    const B = batchSize;
+    const probs = softmaxRows(logits.data, B * places, DIGIT_CLASSES);
+
+    const rejected = batch.digitTargets.slice();
+    let digitAccAcc = 0;
+    let exactAcc = 0;
+    for (let i = 0; i < B; i++) {
+      // Flip a random place that matters (bias toward lower places).
+      const p = Math.floor(Math.random() * Math.min(places, 12));
+      const idx = i * places + p;
+      const cur = rejected[idx]!;
+      rejected[idx] = (cur + 1 + Math.floor(Math.random() * 9)) % 10;
+      const greedy = new Uint8Array(places);
+      for (let q = 0; q < places; q++) {
+        greedy[q] = argmaxDigit(probs, (i * places + q) * DIGIT_CLASSES);
+      }
+      const truth = sliceDigits(batch.digitTargets, i, places);
+      const r = digitRewardFromTargets(greedy, truth, places, 0.5);
+      digitAccAcc += r.digitAcc;
+      exactAcc += r.exact ? 1 : 0;
+    }
+
+    // Push toward chosen, away from rejected.
+    const combined = new Map<string, Tensor>();
+    addGrads(combined, model.backward(cache, batch.digitTargets), 1.0);
+    addGrads(combined, model.backward(cache, rejected), -0.7);
+
+    if (gradsNonZero(combined)) {
+      tAdam += 1;
+      adamStep(model, combined, learningRate, m, v, tAdam);
+    }
+
+    const meanReward = digitAccAcc / B + 0.5 * (exactAcc / B);
+    rewardSum += meanReward;
+    const metrics: DigitRlStepMetrics = {
+      step,
+      steps,
+      meanReward,
+      meanDigitAcc: digitAccAcc / B,
+      exactRate: exactAcc / B,
+      greedyDigitAcc: digitAccAcc / B,
+      baseline: beforeHoldout.accuracy,
+      meanAdvantage: 0,
+      kind: "dpo-digits",
+    };
+    history.push(metrics);
+    await config.onStep?.(metrics);
+  }
+
+  const afterHoldout = await evaluateModel(model, batchFromExprs(holdExprs));
+  return {
+    kind: "dpo-digits",
+    steps,
+    history,
+    beforeHoldout,
+    afterHoldout,
+    holdoutDelta: afterHoldout.accuracy - beforeHoldout.accuracy,
+    meanReward: rewardSum / steps,
+  };
+}
+
+/** Majority-vote self-consistency over temperature samples (inference only). */
+export async function selfConsistentPredict(
+  model: TinyMathMlp,
+  features: Float32Array,
+  samples = 8,
+  temperature = 0.8,
+): Promise<{ answer: bigint; digits: number[]; votes: number[] }> {
+  const places = model.answerDigits;
+  const tallies = Array.from({ length: places }, () => new Float32Array(DIGIT_CLASSES));
+
+  for (let s = 0; s < samples; s++) {
+    const { logits } = await model.forward(tensor([1, features.length], features));
+    const probs = softmaxRows(logits.data, places, DIGIT_CLASSES);
+    for (let p = 0; p < places; p++) {
+      const dig =
+        s === 0
+          ? argmaxDigit(probs, p * DIGIT_CLASSES)
+          : sampleDigit(probs, p * DIGIT_CLASSES, temperature);
+      tallies[p]![dig]! += 1;
+    }
+  }
+
+  const digits: number[] = [];
+  const votes: number[] = [];
+  for (let p = 0; p < places; p++) {
+    let best = 0;
+    let bestV = tallies[p]![0]!;
+    for (let d = 1; d < DIGIT_CLASSES; d++) {
+      if (tallies[p]![d]! > bestV) {
+        bestV = tallies[p]![d]!;
+        best = d;
+      }
+    }
+    digits.push(best);
+    votes.push(bestV);
+  }
+  return { answer: fromDigits(digits), digits, votes };
+}
+
 export async function runPostTrain(
   model: Model,
   config: PostTrainConfig,
 ): Promise<DigitRlResult> {
-  if (config.kind !== "digit-rl") {
+  if (!(model instanceof TinyMathMlp)) {
+    throw new Error("post-train requires TinyMathMlp (digit heads).");
+  }
+  if (config.kind === "digit-rl") return runDigitRl(model, config);
+  if (config.kind === "dpo-digits") return runDpoDigits(model, config);
+  if (config.kind === "self-consistency") {
     throw new Error(
-      `post-train "${config.kind}" not implemented yet — ${describePostTrain(config.kind)}`,
+      "self-consistency is inference-only — call selfConsistentPredict(), not runPostTrain().",
     );
   }
-  if (!(model instanceof TinyMathMlp)) {
-    throw new Error("digit RL requires TinyMathMlp (digit heads).");
-  }
-  return runDigitRl(model, config);
+  throw new Error(`unknown post-train kind`);
 }
 
 export { TOKENS_PER_EXAMPLE };

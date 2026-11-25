@@ -1,19 +1,22 @@
 /**
  * Offline CPU pretrain → public/checkpoints/{simple,mid,ninja}.json
  *
- * Run: npx tsx scripts/pretrain-checkpoints.ts
- * Optional: CHECKPOINT_ONLY=simple npx tsx scripts/pretrain-checkpoints.ts
+ *   npx tsx scripts/pretrain-checkpoints.ts
+ *   CHECKPOINT_ONLY=simple npx tsx scripts/pretrain-checkpoints.ts
+ *   FAST=1 npx tsx scripts/pretrain-checkpoints.ts   # short smoke curricula
  */
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CpuBackend } from "../src/webgpu";
 import { TinyMathMlp } from "../src/model";
 import {
+  ANSWER_DIGITS,
   ArithmeticDataset,
   CURRICULUM,
   MathDataPipeline,
   NINJA_MIX,
+  OPERAND_DIGITS,
   computeAnswer,
   encodeFeatures,
   type Op,
@@ -24,6 +27,7 @@ import {
   FAIR_HOLDOUT_SEED,
   batchFromExprs,
   buildExpressionHoldout,
+  buildLengthProbes,
   evaluateModel,
   isExpressionHeldOut,
 } from "../src/evals";
@@ -38,41 +42,40 @@ import { MODE_PRESETS, type ModeId } from "../src/presets";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = join(ROOT, "public", "checkpoints");
+const FAST = process.env.FAST === "1";
 
-const EASY: Array<readonly [number, Op, number]> = [
-  [3, "+", 5],
-  [12, "+", 7],
-  [9, "-", 4],
-  [20, "-", 8],
-  [6, "*", 7],
-  [48, "/", 6],
+const EASY: Array<readonly [bigint, Op, bigint]> = [
+  [3n, "+", 5n],
+  [12n, "+", 7n],
+  [9n, "-", 4n],
+  [20n, "-", 8n],
+  [6n, "*", 7n],
+  [48n, "/", 6n],
 ];
 
-const HARD: Array<readonly [number, Op, number]> = [
-  [47, "+", 38],
-  [83, "-", 29],
-  [17, "*", 19],
-  [96, "/", 8],
-  [58, "+", 67],
-  [74, "*", 6],
-  [91, "-", 47],
-  [36, "*", 12],
-  [99, "+", 99],
-  [84, "/", 7],
-  [25, "*", 25],
-  [63, "+", 29],
-  [47, "*", 19],
+const HARD: Array<readonly [bigint, Op, bigint]> = [
+  [47n, "+", 38n],
+  [83n, "-", 29n],
+  [17n, "*", 19n],
+  [96n, "/", 8n],
+  [1234n, "+", 5678n],
+  [99999n, "-", 12345n],
+  [123456n, "*", 7n],
+  [1000000n, "/", 8n],
+  [12345678n, "+", 87654321n],
+  [111111111n, "*", 2n],
+  [999999999n, "-", 1n],
+  [314159265n, "+", 271828182n],
 ];
 
 async function probeAcc(
   model: TinyMathMlp,
-  probes: Array<readonly [number, Op, number]>,
+  probes: Array<readonly [bigint, Op, bigint]>,
 ): Promise<number> {
   let ok = 0;
   let n = 0;
   for (const [a, op, b] of probes) {
     const truth = computeAnswer(a, op, b);
-    if (truth >= 1000) continue;
     n++;
     const { answer } = await model.predict(encodeFeatures(a, op, b));
     if (answer === truth) ok++;
@@ -80,24 +83,38 @@ async function probeAcc(
   return n === 0 ? 0 : ok / n;
 }
 
+function fastPreset(id: ModeId) {
+  const p = MODE_PRESETS[id];
+  if (!FAST) return p;
+  return {
+    ...p,
+    epochs: id === "simple" ? 12 : id === "mid" ? 16 : 20,
+    examples: 2048,
+    batch: 64,
+  };
+}
+
 async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number]> {
-  const preset = MODE_PRESETS[id];
+  const preset = fastPreset(id);
   const gpu = new CpuBackend();
   const model = new TinyMathMlp(gpu, preset.hidden);
-  const filter = (a: number, b: number, op: Op) => !isExpressionHeldOut(a, op, b);
+  const filter = (a: bigint, b: bigint, op: Op) => !isExpressionHeldOut(a, op, b);
   const mix =
     preset.mix === "ninja" ? NINJA_MIX : ({ "+": 0.35, "-": 0.2, "*": 0.3, "/": 0.15 } as const);
-  const pipe = new MathDataPipeline(
-    "pretrain",
-    new ArithmeticDataset({ filter, mix, hardBias: preset.hardBias }),
-  );
-  const holdExprs = buildExpressionHoldout(200, FAIR_HOLDOUT_PCT);
+  const dataset = new ArithmeticDataset({
+    filter,
+    mix,
+    hardBias: preset.hardBias,
+    maxDigits: preset.curriculumStart,
+  });
+  const pipe = new MathDataPipeline("pretrain", dataset);
+  const holdExprs = buildExpressionHoldout(256, FAIR_HOLDOUT_PCT, preset.curriculumEnd);
   const heldBatch = batchFromExprs(holdExprs);
   const steps = Math.max(1, Math.round(preset.examples / preset.batch));
   const trainer = new MathTrainer();
 
   console.log(
-    `\n=== Pretrain ${preset.label} · H=${preset.hidden} · ep=${preset.epochs} · ex=${preset.examples} · steps=${steps} ===`,
+    `\n=== Pretrain ${preset.label} · H=${preset.hidden} · ep=${preset.epochs} · ex=${preset.examples} · steps=${steps} · curr ${preset.curriculumStart}→${preset.curriculumEnd}${FAST ? " [FAST]" : ""} ===`,
   );
   const t0 = Date.now();
   const hist = await trainer.train(model, pipe, {
@@ -107,13 +124,16 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     learningRate: preset.lr,
     stepsPerEpoch: steps,
     heldoutBatch: heldBatch,
+    curriculumStartDigits: preset.curriculumStart,
+    curriculumEndDigits: preset.curriculumEnd,
+    onCurriculumDigits: (d) => dataset.setMaxDigits(d),
     onMetrics: (m) => {
-      if (m.epoch === 1 || m.epoch === preset.epochs || m.epoch % 10 === 0) {
+      if (m.epoch === 1 || m.epoch === preset.epochs || m.epoch % Math.max(1, Math.floor(preset.epochs / 8)) === 0) {
         const hold = m.heldout
-          ? ` holdAcc=${(m.heldout.accuracy * 100).toFixed(1)}%`
+          ? ` holdExact=${(m.heldout.accuracy * 100).toFixed(1)}% dig=${(m.heldout.digitAccuracy * 100).toFixed(1)}%`
           : "";
         console.log(
-          `  ep ${String(m.epoch).padStart(3)}  loss=${m.loss.toFixed(4)}  acc=${(m.accuracy * 100).toFixed(1)}%${hold}`,
+          `  ep ${String(m.epoch).padStart(3)}  d=${m.maxDigits}  loss=${m.loss.toFixed(4)}  exact=${(m.accuracy * 100).toFixed(1)}%  digit=${(m.digitAccuracy * 100).toFixed(1)}%${hold}`,
         );
       }
     },
@@ -123,10 +143,19 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
   const easy = await probeAcc(model, EASY);
   const hard = await probeAcc(model, HARD);
   const curriculum = await probeAcc(model, [...CURRICULUM]);
+  const byLength: Record<string, number> = {};
+  for (const bucket of buildLengthProbes(preset.curriculumEnd, 24)) {
+    byLength[String(bucket.digits)] = await probeAcc(model, bucket.exprs);
+  }
   const sec = ((Date.now() - t0) / 1000).toFixed(1);
 
   console.log(
-    `  done in ${sec}s · holdAcc=${(finalHoldout.accuracy * 100).toFixed(1)}% · easy=${(easy * 100).toFixed(0)}% · hard=${(hard * 100).toFixed(0)}% · curr=${(curriculum * 100).toFixed(0)}%`,
+    `  done in ${sec}s · holdExact=${(finalHoldout.accuracy * 100).toFixed(1)}% dig=${(finalHoldout.digitAccuracy * 100).toFixed(1)}% · easy=${(easy * 100).toFixed(0)}% · hard=${(hard * 100).toFixed(0)}% · curr=${(curriculum * 100).toFixed(0)}%`,
+  );
+  console.log(
+    `  byLength: ${Object.entries(byLength)
+      .map(([d, a]) => `${d}=${(a * 100).toFixed(0)}%`)
+      .join(" · ")}`,
   );
 
   const meta = buildCheckpointMeta({
@@ -142,6 +171,10 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
       mix: preset.mix,
       hardBias: preset.hardBias,
       heldout: true,
+      curriculumStart: preset.curriculumStart,
+      curriculumEnd: preset.curriculumEnd,
+      operandDigits: OPERAND_DIGITS,
+      answerDigits: ANSWER_DIGITS,
     },
     holdout: {
       pct: FAIR_HOLDOUT_PCT,
@@ -150,7 +183,7 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     },
     curves: hist,
     finalHoldout,
-    probes: { easy, hard, curriculum },
+    probes: { easy, hard, curriculum, byLength },
     paramCount: TinyMathMlp.paramCount(preset.hidden),
   });
 
@@ -170,6 +203,7 @@ async function trainOne(id: ModeId): Promise<CheckpointManifest["models"][number
     epochs: preset.epochs,
     paramCount: TinyMathMlp.paramCount(preset.hidden),
     finalHoldoutAcc: finalHoldout.accuracy,
+    curriculumEnd: preset.curriculumEnd,
   };
 }
 
@@ -179,12 +213,9 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
 
   const models: CheckpointManifest["models"] = [];
-  // Keep prior manifest entries when training a single id.
   if (only && existsSync(join(OUT_DIR, "manifest.json"))) {
     try {
-      const prev = JSON.parse(
-        await import("node:fs").then((fs) => fs.readFileSync(join(OUT_DIR, "manifest.json"), "utf8")),
-      ) as CheckpointManifest;
+      const prev = JSON.parse(readFileSync(join(OUT_DIR, "manifest.json"), "utf8")) as CheckpointManifest;
       for (const m of prev.models) {
         if (m.id !== only) models.push(m);
       }
