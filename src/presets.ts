@@ -71,7 +71,7 @@ export const MODE_PRESETS: Record<ModeId, ModePreset> = {
 };
 
 /** Default mode when the page loads — Ninja is the impressive story. */
-export const DEFAULT_MODE: ModeId = "mid";
+export const DEFAULT_MODE: ModeId = "ninja";
 
 /** Saved checkpoint ids match mode ids for the three pretrained artifacts. */
 export const CHECKPOINT_IDS: ModeId[] = ["simple", "mid", "ninja"];

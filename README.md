@@ -63,3 +63,13 @@ math-webgpu/
 - `pretrain` — synthetic arithmetic → digit CE
 - `rl` — Digit RL / DPO-digits via `posttrain.ts`
 - `finetune` — plug-in point for instruction packs
+
+## Results (v2 nine-digit checkpoints)
+
+| Model | Curriculum | Hold-out exact | After Digit RL |
+| --- | --- | ---: | ---: |
+| Simple | 1→4 | 82.4% | **90.6%** |
+| Mid | 1→7 | 94.5% | **97.7%** |
+| Ninja | 1→9 (from Mid) | 92.6% | **95.3%** |
+
+Live: https://sofianhn.github.io/math-webgpu/ · Blog: https://sofianhn.github.io/math-webgpu/training.html
