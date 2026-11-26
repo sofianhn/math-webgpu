@@ -4,7 +4,7 @@
     {
       "id": "simple",
       "label": "Simple",
-      "blurb": "Curriculum to 4 digits + Digit RL polish. Hold-out 82.4% \u2192 90.6% (+8.2 pp).",
+      "blurb": "Curriculum to 4 digits + Digit RL polish. Hold-out 82.4% → 90.6% (+8.2 pp).",
       "path": "checkpoints/simple.json",
       "hidden": 256,
       "epochs": 140,
@@ -15,13 +15,24 @@
     {
       "id": "mid",
       "label": "Mid",
-      "blurb": "Curriculum to 7 digits + Digit RL. Hold-out 94.5% \u2192 97.7% (+3.1 pp).",
+      "blurb": "Curriculum to 7 digits + Digit RL. Hold-out 94.5% → 97.7% (+3.1 pp).",
       "path": "checkpoints/mid.json",
       "hidden": 384,
       "epochs": 280,
       "paramCount": 288180,
       "finalHoldoutAcc": 0.9765625,
       "curriculumEnd": 7
+    },
+    {
+      "id": "ninja",
+      "label": "Ninja",
+      "blurb": "Nine-digit calculator · continued from Mid → 9 digits + Digit RL. Hold-out 92.6% → 95.3%.",
+      "path": "checkpoints/ninja.json",
+      "hidden": 384,
+      "epochs": 370,
+      "paramCount": 288180,
+      "finalHoldoutAcc": 0.953125,
+      "curriculumEnd": 9
     }
   ]
 }
