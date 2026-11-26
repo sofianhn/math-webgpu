@@ -6,10 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "pretrain:checkpoints": "tsx scripts/pretrain-checkpoints.ts",
+    "rl:digit": "tsx scripts/run-digit-rl.ts",
+    "posttrain": "tsx scripts/run-digit-rl.ts",
+    "smoke:1": "tsx scripts/smoke-1digit.ts",
+    "smoke:2": "tsx scripts/smoke-2digit-direct.ts"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.54",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
   }

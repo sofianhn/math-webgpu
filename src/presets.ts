@@ -1,15 +1,13 @@
 /**
- * Empirically chosen Simple vs Ninja defaults.
+ * Simple / Mid / Ninja defaults for the nine-digit place-value calculator.
  *
- * Hardened for mul/carry (user fail: 47×19 → 813 vs 893):
- * - NINJA_MIX overweight × + carry-heavy +
- * - two-layer trunk + tens-digit loss weight 1.35
- * - sweep-mul.ts: config B got 47×19 ✓ @ p=1.0, hardMul ~92%, hold ~93%
- *
- * SIMPLE stays faster; Ninja is the page default.
+ * Curriculum grows operand length 1 → endDigits; Ninja reaches full 9 digits
+ * with mul/carry-weighted data and a wider trunk.
  */
+export type ModeId = "simple" | "mid" | "ninja";
+
 export type ModePreset = {
-  id: "simple" | "ninja";
+  id: ModeId;
   label: string;
   blurb: string;
   hidden: number;
@@ -17,31 +15,63 @@ export type ModePreset = {
   lr: number;
   examples: number;
   batch: number;
+  /** Which data mix the mode uses when training fresh. */
+  mix: "simple" | "ninja";
+  hardBias: number;
+  /** Curriculum start / end operand digit lengths. */
+  curriculumStart: number;
+  curriculumEnd: number;
 };
 
-export const MODE_PRESETS: Record<"simple" | "ninja", ModePreset> = {
+export const MODE_PRESETS: Record<ModeId, ModePreset> = {
   simple: {
     id: "simple",
     label: "Simple",
-    blurb: "Faster train · lighter mul mix · solid everyday arithmetic",
-    hidden: 128,
-    epochs: 60,
-    lr: 0.01,
-    examples: 4096,
+    blurb: "Faster train · staircase curriculum to 4 digits · lighter mul mix",
+    hidden: 256,
+    // Weighted staircase + 70% short rehearsal; more epochs on longer lengths.
+    epochs: 140,
+    lr: 0.006,
+    examples: 10240,
     batch: 64,
+    mix: "simple",
+    hardBias: 0.3,
+    curriculumStart: 1,
+    curriculumEnd: 4,
+  },
+  mid: {
+    id: "mid",
+    label: "Mid",
+    blurb: "Middle ground · H384 · staircase curriculum to 7 digits",
+    hidden: 384,
+    epochs: 280,
+    lr: 0.004,
+    examples: 12288,
+    batch: 64,
+    mix: "ninja",
+    hardBias: 0.45,
+    curriculumStart: 1,
+    curriculumEnd: 7,
   },
   ninja: {
     id: "ninja",
     label: "Ninja",
     blurb:
-      "Default · mul/carry-weighted data, deeper trunk, H288 — tuned so hard products like 47×19 land",
-    hidden: 288,
-    epochs: 160,
-    lr: 0.0045,
-    examples: 12288,
+      "Default · nine-digit staircase curriculum, mul/carry-weighted data, H512 shared digit head",
+    hidden: 512,
+    epochs: 400,
+    lr: 0.0028,
+    examples: 16384,
     batch: 64,
+    mix: "ninja",
+    hardBias: 0.55,
+    curriculumStart: 1,
+    curriculumEnd: 9,
   },
 };
 
 /** Default mode when the page loads — Ninja is the impressive story. */
-export const DEFAULT_MODE: "simple" | "ninja" = "ninja";
+export const DEFAULT_MODE: ModeId = "ninja";
+
+/** Saved checkpoint ids match mode ids for the three pretrained artifacts. */
+export const CHECKPOINT_IDS: ModeId[] = ["simple", "mid", "ninja"];

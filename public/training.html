@@ -3,117 +3,96 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Teaching a browser to do arithmetic — Math WebGPU</title>
+    <title>Nine-digit MLP calculator — Math WebGPU</title>
     <link rel="stylesheet" href="./blog.css" />
   </head>
   <body>
     <main class="blog">
       <p class="nav"><a href="./">← Back to the live demo</a> · <a href="./docs/training-the-tiny-math-mlp.md">Raw Markdown</a></p>
       <article>
-        <h1>Teaching a browser to do arithmetic (badly, then better)</h1>
-        <p class="deck">
-          Digit-wise heads, fair held-out, and the empirically tuned
-          <strong>Simple vs Ninja</strong> defaults that actually get good at two-digit math.
-        </p>
-
-        <p>
-          You hit <strong>Train</strong>, watch loss fall, then try an expression. Charts help.
-          But two questions keep coming up: what are those <strong>parameter</strong> bars
-          counting, and what <strong>data</strong> is this thing actually training on?
-        </p>
-
-        <h2>What data it trains on</h2>
-        <p>
-          Each training row is a random expression with operands
-          <strong>a, b ∈ {0…99}</strong> (two digits), an operator in
-          <code>{+, −, ×, ÷}</code>, and a target integer answer. Huge products are
-          resampled so answers stay in classes <strong>0…999</strong>.
-        </p>
-        <p>
-          The live <strong>data feed</strong> on the demo shows rows like
-          <code>12 + 34 = 46 · features a=1|2 op=+ b=3|4 → class 46</code>
-          so you can see the human expression and the feature breakdown.
-        </p>
-
-        <h2>Place-value features (not a flat ID)</h2>
-        <p>
-          Each operand is split into <strong>tens</strong> and <strong>ones</strong> one-hots
-          (10+10), plus 4 operator slots, for both sides → <strong>44</strong> input features.
-          So <code>23</code> and <code>27</code> share “tens = 2”. That is a tiny step toward
-          structure — still not an addition algorithm. The last layer is a softmax over answer
-          classes, not a calculator.
-        </p>
-
-        <h2>What the parameter tables are</h2>
-        <p>
-          Learning rate / epochs / batch / hidden size are <strong>hyperparameters</strong> (how
-          optimization runs). <strong>W1, b1, Wh/Wt/Wo</strong> are the <strong>model parameters</strong>
-          — the arrays of numbers being updated:
-        </p>
-        <table>
-          <thead>
-            <tr><th>Table</th><th>Meaning</th></tr>
-          </thead>
-          <tbody>
-            <tr><td><strong>W1</strong></td><td>weights from input features → hidden units</td></tr>
-            <tr><td><strong>b1</strong></td><td>bias per hidden unit</td></tr>
-            <tr><td><strong>Wh / Wt / Wo</strong></td><td>hundreds / tens / ones digit heads</td></tr>
-            <tr><td><strong>bh / bt / bo</strong></td><td>digit biases</td></tr>
-          </tbody>
-        </table>
-        <p>
-          Bar length = L2 magnitude before → after a run. Count = how many numbers live in that
-          table. Together they are the network’s <strong>memory</strong>, not the training schedule.
-        </p>
-
-        <h2>Why <code>100 + 3</code> will not be fixed by more epochs</h2>
-        <p>
-          The encoder only has tens and ones places. <code>100</code> needs a hundreds place that
-          does not exist. Extra epochs only revisit 0–99. That is a
-          <strong>representation</strong> problem (OOD), not a learning-rate problem.
-        </p>
-
-        <h2>At what point would it learn intrinsically?</h2>
-        <p>
-          <strong>Short answer:</strong> not with this setup alone — even at 100% train accuracy.
-        </p>
-        <p>
-          This model is trained as <strong>input pattern → answer class</strong>. It can memorize
-          many maps. Place-value features may reuse digit patterns, but the loss never asks it to
-          <em>execute</em> addition — only to <em>name the right class</em>.
-        </p>
-        <p>You get closer to intrinsic arithmetic when:</p>
-        <ol>
-          <li><strong>Representation</strong> forces composition (digit outputs, binary, relational magnitudes) <em>and</em> you test numbers never seen in training.</li>
-          <li><strong>Supervision</strong> teaches a procedure (scratchpads / chain-of-thought / tools), not only the final integer.</li>
-          <li><strong>Architecture</strong> can run algorithms (sequence models over digits, program induction), then you measure length/digit generalization.</li>
-        </ol>
-        <p>
-          Fair test: freeze exact expressions while keeping every digit in train — held-out
-          accuracy should be able to rise if digits compose. A harsh ones-digit-7 filter is a
-          different lesson (that input feature never fires). Digit heads still will not invent
-          a hundreds <em>input</em> place for <code>100</code>.
-        </p>
-
-        <h2>Making it learn math (not just memorize)</h2>
+        <h1>How we taught a browser MLP to be a nine-digit calculator</h1>
+        <p class="deck">Place-value features, independent digit heads, staircase curriculum, digit RL / DPO — and the dead ends that looked clever until the probes failed.</p>
+        <hr />
+        <p>The live demo loads a <strong>Ninja</strong> checkpoint and lets you probe expressions up to nine digits, then optionally <strong>post-train</strong> with Digit RL or DPO-digits. This note is the engineering diary: what had to change when we left the cozy two-digit world.</p>
+        <h2>The problem with “just add more classes”</h2>
+        <p>A flat softmax over answers works for toys (<code>0…999</code>). It dies for nine-digit operands:</p>
         <ul>
-          <li><strong>Digit-wise answer head</strong>: predict hundreds / tens / ones, compose <code>100·H + 10·T + O</code>.</li>
-          <li><strong>Fair expression holdout</strong>: freeze ~10% of expressions; every digit 0–9 still appears in train.</li>
-          <li><strong>Simple vs Ninja</strong>: Ninja (default) uses mul/carry-weighted data, a deeper trunk, and tens-digit emphasis so hard products like <code>47 × 19</code> land — not just more epochs.</li>
+        <li>Addition needs up to <strong>10</strong> answer digits.</li>
+        <li>Multiplication needs up to <strong>18</strong>.</li>
+        <li>You cannot materialize a \(10^{18}\)-way classifier in a tab.</li>
         </ul>
-
-        <h2>What to try</h2>
+        <p>So the output is <strong>digit heads</strong>, LSD-first: eighteen independent 10-way classifiers. Exact match means every place is right — including the high zeros that pin the magnitude.</p>
+        <h2>Representation: nine place-value slots per operand</h2>
+        <p>Each operand is encoded as <strong>nine one-hot place slots</strong> (ones…10⁸), plus a 4-way operator one-hot:</p>
+        <p>\[</p>
+        <p><code>inputDim</code> = 9\cdot10 + 4 + 9\cdot10 = 184</p>
+        <p>\]</p>
+        <p>Shorter numbers are zero-padded in the high places. That is what makes curriculum possible: a one-digit <code>3</code> and a nine-digit <code>300000000</code> share the ones-slot structure.</p>
+        <p>BigInt answers (products can exceed <code>Number.MAX_SAFE_INTEGER</code>) are split with <code>toDigits</code> / <code>fromDigits</code> so training never silently corrupts large values.</p>
+        <h2>Architecture: independent heads beat a shared head</h2>
+        <p>We tried a <strong>shared</strong> digit head conditioned on place embeddings. On the old two-digit domain it stalled around <strong>~19%</strong> hold-out exact while digit accuracy looked “fine” (~94%) — classic leading-zero theater plus a head that copied the ones digit upward.</p>
+        <p>Switching back to <strong>independent per-place heads</strong> (the successful H/T/O idea, extended to 18 places) restored strength: the same two-digit stress test reached <strong>~96%</strong> hold-out exact and probes like <code>47 × 19</code> landed again.</p>
+        <p>Trunk: <code>184 → H → ReLU → H → ReLU</code>, then <code>Wheads[p]</code> for <code>p = 0…17</code>. Hybrid WebGPU path: matmuls on GPU, bias/ReLU/softmax/backward on CPU.</p>
+        <h2>Loss: supervise every place, weight the zeros</h2>
+        <p>If you only supervise “significant” digits, high places never learn to stay <code>0</code>. The shared-head bug was partly this; even with independent heads it matters.</p>
+        <p>We supervise <strong>all 18 places</strong> every step, with weights:</p>
+        <ul>
+        <li>significant + near places ≈ <code>1.15–1.35</code> (carries emphasized on low places)</li>
+        <li>far trailing zeros ≈ <code>0.18–0.55</code></li>
+        </ul>
+        <p>Metrics report <strong>exact</strong> (all places) and <strong>digit</strong> (weighted/active). Exact is the calculator scoreboard.</p>
+        <h2>Data: rich mix + staircase curriculum + rehearsal</h2>
+        <p>Sampling is not a tiny grid anymore. We draw across digit lengths with:</p>
+        <ul>
+        <li><strong>Op mix</strong> biased toward <code>×</code> and carry-heavy <code>+</code> (Ninja)</li>
+        <li><strong>Hard bias</strong> for carries, borrows, multi-digit products, non-trivial divides</li>
+        <li><strong>Staircase curriculum</strong>: linger on each max-length before advancing <code>1 → 9</code></li>
+        <li><strong>Short-length rehearsal</strong> (~45% uniform over <code>1…max</code>) so advancing to 7 digits does not erase <code>3 + 5</code></li>
+        </ul>
+        <p>Fair hold-out is hash-based (~10% of expressions). During training we score a <strong>length-matched</strong> hold-out slice so the curve is not punished for nine-digit probes while the model is still on three digits.</p>
+        <h2>Pretrain presets</h2>
+        <table>
+        <tr><th>Mode</th><th>Hidden</th><th>Curriculum</th><th>Role</th></tr>
+        <tr><td>Simple</td><td>256</td><td>1→4</td><td>Fast sanity, shorter operands</td></tr>
+        <tr><td>Mid</td><td>384</td><td>1→7</td><td>Compromise</td></tr>
+        <tr><td>Ninja</td><td>512</td><td>1→9</td><td>Default demo / strong story</td></tr>
+        </table>
+        <p>Checkpoints store weights (f32→base64), hyperparams, per-epoch curves, final hold-out, and length-bucket probes.</p>
+        <h2>Post-training without English</h2>
+        <p>The MLP has no language channel — no chain-of-thought. Post-train still helps:</p>
         <ol>
-          <li>Leave <strong>Ninja</strong> on, hit Train, wait for held-out toward ~90%.</li>
-          <li>Probe <code>47 + 38</code>, <code>17 × 19</code>, <code>25 × 25</code>, plus a held-out bank row.</li>
-          <li>Switch to <strong>Simple</strong> for a faster ~80% held-out pass.</li>
-          <li>Try <code>100 + 3</code> (OOD) — still no hundreds <em>input</em> place.</li>
+        <li><strong>Digit RL</strong> — sample digits from the policy, reward digit-wise correctness (+ exact bonus), self-critical REINFORCE vs greedy baseline, light CE mix so a good pretrained net is not destroyed.</li>
+        <li><strong>DPO-digits</strong> — prefer the true digit sequence over a one-place near-miss for the same expression.</li>
+        <li><strong>Self-consistency</strong> — temperature samples + majority vote at inference (no weight update).</li>
         </ol>
-        <p>
-          <strong>A model only learns the world you can represent — and only the objective you optimize.</strong>
-        </p>
+        <p>Run them in the browser on a loaded checkpoint; Save downloads a new JSON with before/after hold-out deltas.</p>
+        <h2>What actually moved the needle</h2>
+        <p>In rough order of impact for this project:</p>
+        <ol>
+        <li><strong>Independent digit heads</strong> (vs shared+emb)</li>
+        <li><strong>Supervise high zeros</strong> (vs significant-only loss)</li>
+        <li><strong>Place-value inputs</strong> (vs flat operand IDs)</li>
+        <li><strong>Staircase curriculum + rehearsal</strong> (vs linear jump that forgets)</li>
+        <li><strong>Carry/mul-weighted data</strong> (vs uniform ops)</li>
+        <li><strong>Digit RL / DPO</strong> (polish after a strong pretrain)</li>
+        <li><strong>WebGPU matmul</strong> (speed, not accuracy)</li>
+        </ol>
+        <h2>Dead ends worth remembering</h2>
+        <ul>
+        <li>Flat answer classes past three digits.</li>
+        <li>Shared digit head that looked healthy on mean digit accuracy.</li>
+        <li>Curriculum that leaped <code>1 → 2</code> without rehearsal — wiped <code>3 + 5</code>.</li>
+        <li>Judging progress only on train exact while hold-out mixed longer lengths.</li>
+        </ul>
+        <h2>Try it</h2>
+        <p>Live demo: <a href="https://sofianhn.github.io/math-webgpu/">sofianhn.github.io/math-webgpu</a></p>
+        <pre><code>npm install
+npm run dev
+# offline:
+npm run pretrain:checkpoints
+npm run rl:digit</code></pre>
+        <p>The honest ceiling for a tiny feedforward MLP is not “arbitrary precision calculator.” It is <strong>structured digit prediction</strong> with curriculum and post-train. That is still enough to make a browser demo feel like a real arithmetic model — and to teach why representation beats epoch count.</p>
       </article>
-      <p class="nav footer"><a href="./">← Back to the live demo</a></p>
     </main>
   </body>
 </html>

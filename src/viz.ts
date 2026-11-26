@@ -1,16 +1,12 @@
 import type { TrainMetrics } from "./types";
 
 const PARAM_BLURB: Record<string, string> = {
-  W1: "input features → first hidden layer",
+  W1: "place-value features → first hidden layer",
   b1: "bias for first hidden layer",
   W2: "first → second hidden layer (deeper trunk)",
   b2: "bias for second hidden layer",
-  Wh: "hidden → hundreds digit (0–9)",
-  bh: "bias for hundreds digit",
-  Wt: "hidden → tens digit (0–9)",
-  bt: "bias for tens digit",
-  Wo: "hidden → ones digit (0–9)",
-  bo: "bias for ones digit",
+  Wheads: "per-place digit heads (18 × hidden → 0–9)",
+  bheads: "biases for per-place digit heads",
 };
 
 function formatPpl(p: number): string {
@@ -129,7 +125,7 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Top-k class probabilities as a compact list. */
+/** Top-k class probabilities as a compact list (legacy flat classifier). */
 export function renderTopK(el: HTMLElement, probs: Float32Array, k = 5): void {
   const idx = Array.from(probs.keys()).sort((i, j) => probs[j]! - probs[i]!);
   el.innerHTML = idx
@@ -141,4 +137,29 @@ export function renderTopK(el: HTMLElement, probs: Float32Array, k = 5): void {
         <span class="topk-p">${(p * 100).toFixed(1)}%</span></div>`;
     })
     .join("");
+}
+
+/** Per-place top digit probabilities (LSD-first → display MSD-first for the active length). */
+export function renderDigitPlaces(
+  el: HTMLElement,
+  digitProbs: Float32Array,
+  digits: number[],
+  classes = 10,
+): void {
+  // Trim leading high-place zeros for display, keep at least ones.
+  let hi = digits.length - 1;
+  while (hi > 0 && digits[hi] === 0) hi--;
+  const rows: string[] = [];
+  for (let p = hi; p >= 0; p--) {
+    const off = p * classes;
+    let best = digits[p]!;
+    let bestP = digitProbs[off + best]!;
+    const placeName = p === 0 ? "10⁰" : `10${String(p).split("").map((c) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(c)]).join("")}`;
+    rows.push(
+      `<div class="topk-row"><span class="topk-cls">${placeName}=${best}</span>
+        <div class="topk-track"><div class="topk-fill" style="width:${(bestP * 100).toFixed(1)}%"></div></div>
+        <span class="topk-p">${(bestP * 100).toFixed(1)}%</span></div>`,
+    );
+  }
+  el.innerHTML = rows.join("");
 }
